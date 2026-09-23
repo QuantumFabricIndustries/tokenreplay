@@ -1,0 +1,13 @@
+{"value": [
+  {"activityDateTime": "2026-09-20T20:00:00Z",
+   "activityDisplayName": "User registered security info",
+   "initiatedBy": {"user": {"userPrincipalName": "dave@corp.com"}},
+   "targetResources": [{"userPrincipalName": "dave@corp.com"}],
+   "result": "success"},
+
+  {"activityDateTime": "2026-09-18T10:00:00Z",
+   "activityDisplayName": "User registered security info",
+   "initiatedBy": {"user": {"userPrincipalName": "frank@corp.com"}},
+   "targetResources": [{"userPrincipalName": "frank@corp.com"}],
+   "result": "success"}
+]}
