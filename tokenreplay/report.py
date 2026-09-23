@@ -3,9 +3,10 @@ import json
 import time
 
 
-def render(result, as_json=False):
+def render(result, as_json=False, warnings=(), recs=()):
     if as_json:
-        doc = {"overall": result["_overall"]["verdict"], "users": {}}
+        doc = {"overall": result["_overall"]["verdict"], "users": {},
+               "warnings": list(warnings), "recommendations": list(recs)}
         for user, u in result.items():
             if user == "_overall":
                 continue
@@ -19,6 +20,8 @@ def render(result, as_json=False):
         return json.dumps(doc, indent=2)
 
     lines = []
+    for w in warnings:
+        lines.append(f"WARN: {w}")
     order = {"COMPROMISED": 3, "HIGH RISK": 2, "SUSPICIOUS": 1,
              "CLEAN": 0}
     users = sorted(
@@ -35,4 +38,9 @@ def render(result, as_json=False):
             lines.append(f"    {f.rule:<24} {when}Z  {f.detail}")
     lines.append("")
     lines.append(f"OVERALL: {result['_overall']['verdict']}")
+    if recs:
+        lines.append("")
+        lines.append("RECOMMENDATIONS:")
+        for r in recs:
+            lines.append(f"  - {r}")
     return "\n".join(lines)

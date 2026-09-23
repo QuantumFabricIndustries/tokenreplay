@@ -28,6 +28,28 @@ HOSTING_HINTS = (
     "changi", "hostwinds", "vps", "hosting",
 )
 
+# ASN numbers of the same fleets — stable, small, bundled. Graph's
+# signIn record carries autonomousSystemNumber; matching on numbers is
+# what makes same-country replay (US victim -> US VPS) visible.
+HOSTING_ASNS = {
+    14061,                    # DigitalOcean
+    24940, 21502,             # Hetzner
+    16276, 35540,             # OVH
+    20473,                    # Vultr/Choopa
+    63949,                    # Linode / Akamai Connected Cloud
+    51167,                    # Contabo
+    9009,                     # M247
+    16509, 14618, 8987,       # AWS
+    15169, 396982, 19527,     # Google / GCP
+    8075, 8068, 8069, 12076,  # Microsoft / Azure
+    31898,                    # Oracle Cloud
+    45102,                    # Alibaba
+    132203,                   # Tencent
+    30633, 395954,            # Leaseweb
+    36007,                    # Kamatera
+    54290,                    # Hostwinds
+}
+
 # activityDisplayName substrings — security-info registration is the
 # persistence move after a captured session (ShinyHunters/Helix play)
 _MFA_ACTS = (
@@ -49,24 +71,48 @@ def _users(signins):
     return by
 
 
-def session_replay(signins):
-    """Same sessionId observed from 2+ distinct IPs or countries — the
-    literal token-replay signature. Skipped silently when the export
-    doesn't carry sessionId (free-tier logs often don't)."""
+def session_replay(signins, asnmap=None):
+    """Same sessionId observed from a DIFFERENT NETWORK — keyed on ASN
+    change, not country: the common case is a victim and the replaying
+    host in the same country (US user, US-hosted VPS). Country change is
+    a booster on top, not the trigger. Falls back to IP+country when
+    records lack autonomousSystemNumber."""
     by_sess = {}
     for s in signins:
         if s.session_id and s.ok:
             by_sess.setdefault((s.upn, s.session_id), []).append(s)
     out = []
     for (upn, sess), rows in by_sess.items():
+        asns = {r.asn for r in rows if r.asn}
         ips = {r.ip for r in rows if r.ip}
         countries = {r.country for r in rows if r.country}
-        if len(ips) >= 2 and len(countries) >= 2:
-            rows.sort(key=lambda r: r.ts)
-            out.append(Finding(
-                "session-replay", upn, rows[0].ts,
-                f"session {sess[:8]}... seen from {len(ips)} IPs across "
-                f"{sorted(countries)} (replay)"))
+        hosting = [r.asn for r in rows if r.asn in HOSTING_ASNS]
+        labels = {_asn_label(r.ip, asnmap) for r in rows} - {""} \
+            if asnmap else set()
+        hosting_lbl = [l for l in labels
+                       if any(h in l for h in HOSTING_HINTS)]
+        # replay needs the session on 2+ networks: >=2 distinct ASNs,
+        # or (when ASN data is thin) the old IP+country heuristic.
+        # A single sign-in from a hosting ASN is hosting_asn's job,
+        # not proof of replay.
+        net_changed = len(rows) >= 2 and (
+            len(asns) >= 2 or
+            (len(ips) >= 2 and len(countries) >= 2))
+        if not net_changed:
+            continue
+        rows.sort(key=lambda r: r.ts)
+        bits = [f"ASNs {sorted(asns)}" if len(asns) >= 2
+                else f"{len(ips)} IPs"]
+        if len(countries) >= 2:
+            bits.append(f"across {sorted(countries)}")
+        if hosting:
+            bits.append(f"hosting AS{hosting[0]} involved")
+        if hosting_lbl:
+            bits.append(f"hosting '{hosting_lbl[0]}' involved")
+        out.append(Finding(
+            "session-replay", upn, rows[0].ts,
+            f"session {sess[:8]}... replayed from a different network: "
+            + "; ".join(bits)))
     return out
 
 
@@ -114,33 +160,55 @@ def _asn_label(ip, nets):
 
 
 def hosting_asn(signins, asnmap):
-    """Interactive+success sign-in from a hosting-provider prefix — AiTM
-    kits run on VPS; humans rarely auth from a datacenter. Needs an
-    --asnmap file; without it this rule is unavailable, not silent."""
-    if not asnmap:
-        return []
+    """Interactive+success sign-in from a hosting provider — AiTM kits
+    run on VPS; humans rarely auth from a datacenter. Primary source is
+    the record's own autonomousSystemNumber vs the bundled HOSTING_ASNS
+    list; --asnmap labels are the override. With neither ASN data nor a
+    map the rule is unavailable, not silent."""
     out = []
     for s in signins:
         if not (s.interactive and s.ok):
             continue
-        label = _asn_label(s.ip, asnmap)
-        if label and any(h in label for h in HOSTING_HINTS):
+        if s.asn and s.asn in HOSTING_ASNS:
             out.append(Finding(
                 "hosting-asn", s.upn, s.ts,
-                f"interactive auth from hosting ASN '{label}' "
-                f"({s.ip})"))
+                f"interactive auth from hosting ASN{s.asn} ({s.ip})"))
+            continue
+        if asnmap:
+            label = _asn_label(s.ip, asnmap)
+            if label and any(h in label for h in HOSTING_HINTS):
+                out.append(Finding(
+                    "hosting-asn", s.upn, s.ts,
+                    f"interactive auth from hosting '{label}' "
+                    f"({s.ip})"))
     return out
 
 
 def device_code(signins, baselines):
-    """Device-code flow abuse: flagged when the user has no device-code
-    history, or it arrives from a country outside their baseline."""
+    """Device-code flow abuse, three layers:
+
+    - tenant baselines exist and NOBODY has device-code history -> the
+      tenant doesn't use the flow; any use is high severity
+      (`device-code-tenant`)
+    - tenant does use it -> fall back to the per-user baseline: no
+      history or unseen country flags (`device-code-flow`)
+    - no baselines at all -> can't prove tenant history; flag per-user
+      as before
+    """
     out = []
+    tenant_uses_dc = any(b.device_code_used
+                         for b in baselines.values())
     for s in signins:
         if s.protocol != "devicecode" or not s.ok:
             continue
         b = baselines.get(s.upn)
-        if b is None or not b.device_code_used:
+        if baselines and not tenant_uses_dc:
+            out.append(Finding(
+                "device-code-tenant", s.upn, s.ts,
+                "device-code auth but the TENANT has no device-code "
+                "history - the flow isn't legitimate here "
+                "(EvilTokens pattern)"))
+        elif b is None or not b.device_code_used:
             out.append(Finding(
                 "device-code-flow", s.upn, s.ts,
                 "device-code auth with NO prior device-code usage for "
@@ -150,6 +218,47 @@ def device_code(signins, baselines):
                 "device-code-flow", s.upn, s.ts,
                 f"device-code auth from unseen country {s.country}"))
     return out
+
+
+def coverage_warnings(signins):
+    """What the input can't see. The Entra portal exports interactive
+    and non-interactive sign-ins SEPARATELY, and replayed tokens mostly
+    surface on the non-interactive side — an interactive-only export
+    means session-replay quietly finds almost nothing."""
+    if not signins:
+        return []
+    types = set()
+    for s in signins:
+        if s.event_types:
+            types |= s.event_types
+        else:
+            types.add("interactiveuser" if s.interactive
+                      else "noninteractiveuser")
+    if not any("noninteractive" in t for t in types):
+        return ["input has NO non-interactive sign-ins - replayed "
+                "tokens mostly surface there; the Entra portal exports "
+                "interactive and non-interactive sign-ins separately"]
+    if not any(s.asn for s in signins):
+        return ["records carry no autonomousSystemNumber - session "
+                "replay degrades to IP+country; same-country replay "
+                "(US victim -> US VPS) may be missed"]
+    return []
+
+
+def recommendations(findings):
+    """The actual fix for each attack class — findings say what
+    happened, these say what to do about it."""
+    rules = {f.rule for f in findings}
+    recs = []
+    if rules & {"device-code-flow", "device-code-tenant"}:
+        recs.append("Conditional Access: block device-code flow "
+                    "(authentication flows condition) for users who "
+                    "don't need it - device-code phishing can't land")
+    if "session-replay" in rules:
+        recs.append("Conditional Access: enable token protection / "
+                    "session binding on cloud apps - a captured token "
+                    "fails to replay off the original device")
+    return recs
 
 
 def mfa_method_add(audits):
@@ -207,7 +316,7 @@ def evaluate(signins, audits=(), baselines=None, asnmap=None):
     """All rules + correlation -> finding list."""
     baselines = baselines or {}
     out = []
-    out += session_replay(signins)
+    out += session_replay(signins, asnmap)
     out += impossible_travel(signins)
     out += hosting_asn(signins, asnmap)
     out += device_code(signins, baselines)

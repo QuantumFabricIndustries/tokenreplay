@@ -28,3 +28,33 @@ collection deferred as phase 2. Verdict semantics mirror tokenwatch
 (observed-attack classes force COMPROMISED). Correlation rule is the
 differentiator: device-code-flow alone = HIGH RISK, device-code +
 security-info add within 72h = COMPROMISED.
+
+## Round 2 — user-directed fixes (2026-09-23)
+- [x] session-replay keyed on NETWORK change (ASN), not country — the
+      common case is same-country replay (US victim -> US VPS) which a
+      country-keyed rule misses entirely. Country is a booster. ALSO:
+      caught and fixed a bug where a single sign-in from a hosting ASN
+      fired "replay" — replay requires >=2 networks.
+- [x] autonomousSystemNumber parsed from records; bundled HOSTING_ASNS
+      number list (~25 ASNs, stable). --asnmap stays as CIDR-label
+      override; unavailable reported when neither source exists.
+- [x] coverage_warnings(): interactive-only exports WARN loudly —
+      Entra portal exports interactive/non-interactive separately and
+      replayed tokens mostly land on the non-interactive side. Missing
+      ASN data warns too (degraded to IP+country).
+- [x] device-code tenant layer: tenant has NO device-code history ->
+      device-code-tenant (65); tenant uses it -> per-user baseline.
+- [x] report RECOMMENDATIONS: CA policy to block device-code flow;
+      token protection/session binding after session-replay.
+- [x] 25 tests green.
+
+## Noted, not built
+- [ ] inbox rules / mailbox forwarding post-flag (BEC follow-up) —
+      needs Exchange unified audit log, separate API from Graph sign-ins
+- [ ] live poll proof needs an Entra P1 tenant (Business Premium trial)
+
+## Review addendum
+session_replay logic bug found by the live fixture run, not unit tests:
+`or hosting` made single-record sessions "replayed". Fixed: replay
+requires >=2 distinct networks; single hosting sign-in belongs to
+hosting_asn.

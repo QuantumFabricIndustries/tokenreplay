@@ -31,13 +31,18 @@ exported Graph JSON — no API access needed to develop, test, or triage.
 
 | rule | weight | what it catches |
 |---|---|---|
-| `session-replay` | 80, forces COMPROMISED | same `sessionId` seen from 2+ IPs across 2+ countries — the literal replay signature |
+| `session-replay` | 80, forces COMPROMISED | same `sessionId` from 2+ **networks** — keyed on `autonomousSystemNumber` change, not country, because the common case is same-country replay (US victim, US VPS). Country change is a booster; falls back to IP+country when ASN data is absent |
 | `persistence-correlated` | 90, forces COMPROMISED | security-info/MFA-method registration within 72h of any other flag for that user — the capture-then-persist chain (ShinyHunters/Helix play) |
-| `hosting-asn` | 55 | interactive auth from a VPS/hosting prefix — AiTM kits run on DO/Hetzner/OVH/etc (needs `--asnmap`) |
-| `device-code-flow` | 55 | device-code auth with no prior usage, or from an unseen country (EvilTokens pattern) |
+| `device-code-tenant` | 65 | device-code auth when the TENANT has no device-code history — the flow isn't legitimate here at all |
+| `hosting-asn` | 55 | interactive auth from a hosting ASN — matched on the record's own `autonomousSystemNumber` vs a bundled list (DO/Hetzner/OVH/AWS/GCP/Azure/…), `--asnmap` CIDR labels as override |
+| `device-code-flow` | 55 | device-code auth with no user history, or from an unseen country |
 | `impossible-travel` | 45 | consecutive sign-ins faster than physics |
 | `mfa-method-add` | 35 | security-info registration, uncorrelated |
 | `rare-country` | 20 | first-seen country vs baseline — weak alone |
+
+The report ends with **RECOMMENDATIONS** — the actual fix per attack
+class (e.g. Conditional Access blocking device-code flow for users who
+don't need it; token protection / session binding after a replay).
 
 Verdicts per user: `CLEAN` <20 · `SUSPICIOUS` 20-49 · `HIGH RISK` 50-79 ·
 `COMPROMISED` 80+ (or forced). Per-rule caps prevent stacking; the
@@ -69,20 +74,31 @@ watermarked, paged). Config at `~/.tokenreplay/graph.json`:
 The app registration needs `AuditLog.Read.All` **application**
 permission + admin consent. Honest status: written against the Graph
 contract, not exercised against a real tenant yet — treat `poll` as
-alpha; `analyze` on exported JSON is the proven path.
+alpha; `analyze` on exported JSON is the proven path. A live proof
+needs Entra ID P1 (sign-in log retention + detail fields); a Business
+Premium trial tenant is the simplest way to get one.
 
 ## Honest coverage boundaries
 
 - **Detection latency = collection interval.** This is polling, not
   real-time streaming — a replay that lives and dies between polls is
   invisible.
+- **The Entra portal exports interactive and non-interactive sign-ins
+  separately**, and replayed tokens mostly surface on the
+  non-interactive side. `analyze` inspects `signInEventTypes`/
+  `isInteractive` and prints a WARN when the input has no
+  non-interactive records — a clean interactive-only scan is not clean.
 - **`sessionId` presence varies.** Free-tier/basic sign-in records often
-  lack it; `session-replay` silently can't fire without it (the other
-  rules still work).
-- **No ASN database is bundled.** Hosting-ASN evidence needs an
-  `--asnmap` file of CIDR->label mappings (cloud providers publish their
-  prefix lists; a downloader is future work). Without it the rule is
-  reported as unavailable, not silently off.
+  lack it; `session-replay` can't fire without it (the other rules still
+  work, and the missing-ASN case degrades to IP+country with a warning).
+- **No ASN *database* is bundled** — the record's own
+  `autonomousSystemNumber` is matched against a small bundled list of
+  hosting ASNs; `--asnmap` (CIDR->label) is the override for networks we
+  don't carry. With neither source the rule reports unavailable.
+- **Next rule, noted not built**: inbox rules / mailbox forwarding
+  created after a flag — the classic BEC follow-up, natural pair for
+  `correlate()`'s 72h window. Needs the Exchange side of the unified
+  audit log (separate API surface from Graph sign-ins).
 - **Residential-proxy AiTM evades `hosting-asn`.** Kits relaying through
   residential IPs don't trip ASN evidence — `session-replay` /
   `impossible-travel` are the fallback signals.

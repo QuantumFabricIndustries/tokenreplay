@@ -46,13 +46,16 @@ class TestParsing(unittest.TestCase):
 
 
 class TestEvidence(unittest.TestCase):
-    def test_session_replay(self):
+    def test_session_replay_same_country_cross_asn(self):
+        """The common case: US victim, US-hosted VPS. Country is a
+        booster, not the trigger — network (ASN) change fires it."""
         out = evidence.session_replay(_signins())
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0].user, "bob@corp.com")
-        self.assertIn("DE", out[0].detail)
+        self.assertIn("different network", out[0].detail)
+        self.assertIn("14061", out[0].detail)      # hosting ASN named
 
-    def test_session_replay_same_country_no_fire(self):
+    def test_session_replay_same_network_no_fire(self):
         rows = [s for s in _signins() if s.upn == "alice@corp.com"]
         self.assertEqual(evidence.session_replay(rows), [])
 
@@ -60,18 +63,34 @@ class TestEvidence(unittest.TestCase):
         out = evidence.impossible_travel(_signins())
         users = {f.user for f in out}
         self.assertIn("carol@corp.com", users)     # NYC -> SG in 30min
-        self.assertIn("bob@corp.com", users)       # Chicago -> DE in 15min
+        self.assertIn("bob@corp.com", users)       # Chicago -> NYC in
+                                                   # 15min still too fast
         self.assertNotIn("alice@corp.com", users)
 
-    def test_hosting_asn(self):
-        nets = evidence.load_asnmap(ASNMAP)
-        out = evidence.hosting_asn(_signins(), nets)
-        self.assertEqual(len(out), 1)
-        self.assertEqual(out[0].user, "erin@corp.com")
-        self.assertIn("digitalocean", out[0].detail)
+    def test_hosting_asn_via_asn_number(self):
+        """No map needed — the record's own autonomousSystemNumber is
+        matched against the bundled hosting list."""
+        out = evidence.hosting_asn(_signins(), asnmap=None)
+        users = {f.user for f in out}
+        self.assertEqual(users, {"erin@corp.com", "dave@corp.com"})
+        by_user = {f.user: f for f in out}
+        self.assertIn("14061", by_user["erin@corp.com"].detail)
+        self.assertIn("16276", by_user["dave@corp.com"].detail)
 
-    def test_hosting_asn_no_map_is_empty_not_silent(self):
-        self.assertEqual(evidence.hosting_asn(_signins(), None), [])
+    def test_hosting_asn_map_override(self):
+        """--asnmap labels stay an override for numbers we don't carry."""
+        class Fake(si.SignIn):
+            pass
+        s = si.SignIn(id="x", ts=1, upn="u@x", ip="203.0.113.9",
+                      country="US", lat=0, lon=0, app="a", client_app="",
+                      os="", browser="", interactive=True, mfa=True,
+                      protocol="", session_id="", asn=99999,
+                      event_types=set(), ok=True, risk="",
+                      network_type="")
+        out = evidence.hosting_asn(
+            [s], evidence.load_asnmap(ASNMAP))
+        self.assertEqual(len(out), 1)
+        self.assertIn("digitalocean", out[0].detail)
 
     def test_device_code_no_history(self):
         out = evidence.device_code(_signins(), baselines={})
@@ -89,6 +108,33 @@ class TestEvidence(unittest.TestCase):
         out = evidence.device_code(_signins(), base)
         self.assertEqual(len(out), 1)
         self.assertIn("unseen country", out[0].detail)
+
+    def test_device_code_tenant_layer(self):
+        """Baselines exist, nobody uses device code -> ANY use is the
+        high-severity tenant finding, not the per-user one."""
+        base = _baseline("alice@corp.com",
+                         countries={"US"}, device_code_used=False)
+        out = evidence.device_code(_signins(), base)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].rule, "device-code-tenant")
+
+    def test_coverage_warnings_interactive_only(self):
+        """An interactive-only export must not look like a clean scan."""
+        interactive_only = [s for s in _signins() if s.interactive]
+        w = evidence.coverage_warnings(interactive_only)
+        self.assertTrue(any("non-interactive" in x for x in w))
+
+    def test_coverage_warnings_mixed_export_quiet(self):
+        self.assertFalse(
+            any("non-interactive" in x
+                for x in evidence.coverage_warnings(_signins())))
+
+    def test_coverage_warnings_no_asn(self):
+        rows = _signins()
+        for s in rows:
+            s.asn = 0
+        w = evidence.coverage_warnings(rows)
+        self.assertTrue(any("autonomousSystemNumber" in x for x in w))
 
     def test_rare_country(self):
         base = _baseline("carol@corp.com", countries={"US"})
@@ -124,6 +170,12 @@ class TestScoring(unittest.TestCase):
         self.assertEqual(res["frank@corp.com"]["verdict"], "SUSPICIOUS")
         self.assertEqual(res["_overall"]["verdict"], "COMPROMISED")
         self.assertNotIn("alice@corp.com", res)      # clean -> absent
+
+    def test_recommendations(self):
+        findings = evidence.evaluate(_signins(), _audits())
+        recs = evidence.recommendations(findings)
+        self.assertTrue(any("device-code" in r for r in recs))
+        self.assertTrue(any("token protection" in r for r in recs))
 
     def test_caps(self):
         fs = [evidence.Finding("rare-country", "u", 0, str(i))

@@ -10,6 +10,8 @@ WEIGHTS = {
     "persistence-correlated":  90,   # MFA-method add within 72h of a flag —
                                    # the capture-then-persist chain
     "hosting-asn":             55,   # interactive auth from a VPS ASN
+    "device-code-tenant":      65,   # tenant has NO device-code history —
+                                     # the flow isn't legitimate here
     "device-code-flow":        55,   # device-code w/ no history or new geo
     "impossible-travel":       45,   # physics violation between sign-ins
     "mfa-method-add":          35,   # security-info registration, uncorrelated

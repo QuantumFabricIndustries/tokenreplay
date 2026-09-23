@@ -27,19 +27,26 @@ def cmd_analyze(a):
     base = bl.load(a.baselines) if a.baselines else {}
     asnmap = evidence.load_asnmap(_load_json(a.asnmap)) \
         if a.asnmap else None
-    if a.asnmap is None:
-        print("note: no --asnmap; hosting-ASN evidence unavailable",
-              file=sys.stderr)
+    warnings = list(evidence.coverage_warnings(signins))
+    if a.asnmap is None and not any(s.asn for s in signins):
+        warnings.append("no --asnmap and records lack "
+                        "autonomousSystemNumber; hosting-ASN evidence "
+                        "unavailable")
     findings = evidence.evaluate(signins, audits, baselines=base,
                                  asnmap=asnmap)
     result = score.score(findings)
-    out = report.render(result, as_json=a.json)
+    recs = evidence.recommendations(findings)
+    out = report.render(result, as_json=a.json,
+                        warnings=warnings, recs=recs)
+    for w in warnings:
+        print(f"WARN: {w}", file=sys.stderr)
     if a.output:
         Path(a.output).write_text(out, encoding="utf-8")
     print(out)
     _state_dir().mkdir(parents=True, exist_ok=True)
     (_state_dir() / "last_report.json").write_text(
-        report.render(result, as_json=True), encoding="utf-8")
+        report.render(result, as_json=True, warnings=warnings,
+                      recs=recs), encoding="utf-8")
     return 0 if result["_overall"]["verdict"] in ("CLEAN", "SUSPICIOUS") \
         else 1
 
@@ -57,7 +64,7 @@ def cmd_baselines(a):
 def cmd_report(a):
     p = _state_dir() / "last_report.json"
     if not p.exists():
-        print("no report — run analyze first", file=sys.stderr)
+        print("no report - run analyze first", file=sys.stderr)
         return 2
     doc = json.loads(p.read_text(encoding="utf-8"))
     if a.json:
@@ -84,10 +91,16 @@ def cmd_poll(a):
         if (_state_dir() / "baselines.json").exists() else {}
     findings = evidence.evaluate(parsed_s, parsed_a, baselines=base)
     result = score.score(findings)
-    print(report.render(result, as_json=a.json))
+    warnings = list(evidence.coverage_warnings(parsed_s))
+    recs = evidence.recommendations(findings)
+    print(report.render(result, as_json=a.json,
+                        warnings=warnings, recs=recs))
+    for w in warnings:
+        print(f"WARN: {w}", file=sys.stderr)
     _state_dir().mkdir(parents=True, exist_ok=True)
     (_state_dir() / "last_report.json").write_text(
-        report.render(result, as_json=True), encoding="utf-8")
+        report.render(result, as_json=True, warnings=warnings,
+                      recs=recs), encoding="utf-8")
     return 0 if result["_overall"]["verdict"] in ("CLEAN", "SUSPICIOUS") \
         else 1
 

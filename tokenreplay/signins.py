@@ -36,6 +36,10 @@ class SignIn:
     mfa: bool               # auth requirement satisfied via MFA
     protocol: str           # "deviceCode" etc (lowercased)
     session_id: str
+    asn: int                # autonomousSystemNumber — the network change
+                            # signal; country alone misses same-country
+                            # replay (US victim -> US VPS)
+    event_types: set        # signInEventTypes lowercased
     ok: bool                # status.errorCode == 0
     risk: str
     network_type: str       # trustednamedlocation / namedlocation / ""
@@ -68,6 +72,9 @@ def parse_signins(obj):
                 or "mfa" in req.lower(),
             protocol=(r.get("authenticationProtocol") or "").lower(),
             session_id=r.get("sessionId") or "",
+            asn=int(r.get("autonomousSystemNumber") or 0),
+            event_types={str(t).lower()
+                         for t in (r.get("signInEventTypes") or [])},
             ok=(r.get("status") or {}).get("errorCode", 1) == 0,
             risk=(r.get("riskLevelAggregated") or "").lower(),
             network_type=(net.get("networkType") or "").lower(),
