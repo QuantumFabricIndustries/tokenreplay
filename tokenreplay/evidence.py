@@ -71,48 +71,89 @@ def _users(signins):
     return by
 
 
-def session_replay(signins, asnmap=None):
+def _tenant_egress(baselines, min_users=3):
+    """ASNs shared by >=min_users different tenant users are shared
+    egress — Zscaler/WARP/Netskope/corporate VPN/VDI all put real users
+    on AWS/Azure/GCP/Cloudflare ASNs. Treat them as infrastructure, not
+    an attacker's VPS."""
+    users_per_asn = {}
+    for b in baselines.values():
+        for a in b.asns:
+            users_per_asn[a] = users_per_asn.get(a, 0) + 1
+    return {a for a, n in users_per_asn.items() if n >= min_users}
+
+
+def _hosting_tag(row, asnmap):
+    """-> hosting descriptor or "" — the record's own ASN number first,
+    then the --asnmap label override."""
+    if row.asn and row.asn in HOSTING_ASNS:
+        return f"hosting AS{row.asn}"
+    if asnmap:
+        label = _asn_label(row.ip, asnmap)
+        if label and any(h in label for h in HOSTING_HINTS):
+            return f"hosting '{label}'"
+    return ""
+
+
+def session_replay(signins, baselines=None, asnmap=None, allow_asn=()):
     """Same sessionId observed from a DIFFERENT NETWORK — keyed on ASN
-    change, not country: the common case is a victim and the replaying
-    host in the same country (US user, US-hosted VPS). Country change is
-    a booster on top, not the trigger. Falls back to IP+country when
-    records lack autonomousSystemNumber."""
+    change, not country (US victim -> US VPS is the common case).
+
+    FP gate: the NEW sighting only counts as replay when its network is
+    hosting or never-seen-for-this-user. A phone roaming home wifi <->
+    cellular changes ASN all day on networks it has history on — that's
+    `session-network-drift` info, not replay."""
+    baselines = baselines or {}
+    allow = {int(a) for a in allow_asn}
+    egress = _tenant_egress(baselines)
     by_sess = {}
     for s in signins:
         if s.session_id and s.ok:
             by_sess.setdefault((s.upn, s.session_id), []).append(s)
     out = []
     for (upn, sess), rows in by_sess.items():
+        rows.sort(key=lambda r: r.ts)
         asns = {r.asn for r in rows if r.asn}
         ips = {r.ip for r in rows if r.ip}
         countries = {r.country for r in rows if r.country}
-        hosting = [r.asn for r in rows if r.asn in HOSTING_ASNS]
-        labels = {_asn_label(r.ip, asnmap) for r in rows} - {""} \
-            if asnmap else set()
-        hosting_lbl = [l for l in labels
-                       if any(h in l for h in HOSTING_HINTS)]
-        # replay needs the session on 2+ networks: >=2 distinct ASNs,
-        # or (when ASN data is thin) the old IP+country heuristic.
-        # A single sign-in from a hosting ASN is hosting_asn's job,
-        # not proof of replay.
+        # replay needs the session on 2+ networks — a single sighting is
+        # hosting_asn's job, not proof of replay
         net_changed = len(rows) >= 2 and (
             len(asns) >= 2 or
             (len(ips) >= 2 and len(countries) >= 2))
         if not net_changed:
             continue
-        rows.sort(key=lambda r: r.ts)
-        bits = [f"ASNs {sorted(asns)}" if len(asns) >= 2
-                else f"{len(ips)} IPs"]
-        if len(countries) >= 2:
-            bits.append(f"across {sorted(countries)}")
-        if hosting:
-            bits.append(f"hosting AS{hosting[0]} involved")
-        if hosting_lbl:
-            bits.append(f"hosting '{hosting_lbl[0]}' involved")
-        out.append(Finding(
-            "session-replay", upn, rows[0].ts,
-            f"session {sess[:8]}... replayed from a different network: "
-            + "; ".join(bits)))
+        b = baselines.get(upn)
+        base_asns = (b.asns if b else set()) | egress | allow
+
+        def suspicious(r):
+            if r.asn in allow:
+                return ""
+            tag = _hosting_tag(r, asnmap)
+            if tag:
+                return tag
+            if r.asn and b and r.asn not in base_asns:
+                return f"AS{r.asn} never seen for this user"
+            if not r.asn and r.country and b \
+                    and r.country not in b.countries:
+                return f"first-seen country {r.country}"
+            return ""
+
+        hits = [tag for r in rows[1:] if (tag := suspicious(r))]
+        if hits:
+            out.append(Finding(
+                "session-replay", upn, rows[0].ts,
+                f"session {sess[:8]}... replayed from a different "
+                f"network: ASNs {sorted(asns) or ips}; "
+                f"{'; '.join(sorted(set(hits)))}"
+                + (f" across {sorted(countries)}"
+                   if len(countries) >= 2 else "")))
+        else:
+            out.append(Finding(
+                "session-network-drift", upn, rows[0].ts,
+                f"session {sess[:8]}... seen from ASNs "
+                f"{sorted(asns) or ips} - all known-for-user or "
+                f"unverifiable networks (mobile roaming shape)"))
     return out
 
 
@@ -159,28 +200,27 @@ def _asn_label(ip, nets):
     return ""
 
 
-def hosting_asn(signins, asnmap):
+def hosting_asn(signins, asnmap, baselines=None, allow_asn=()):
     """Interactive+success sign-in from a hosting provider — AiTM kits
     run on VPS; humans rarely auth from a datacenter. Primary source is
     the record's own autonomousSystemNumber vs the bundled HOSTING_ASNS
-    list; --asnmap labels are the override. With neither ASN data nor a
-    map the rule is unavailable, not silent."""
+    list; --asnmap labels are the override; --allow-asn suppresses.
+
+    Tenant-egress gate: an ASN already in >=3 users' baselines is shared
+    corporate egress (SASE/WARP/VDI), not an attacker's VPS."""
+    allow = {int(a) for a in allow_asn}
+    egress = _tenant_egress(baselines or {})
     out = []
     for s in signins:
         if not (s.interactive and s.ok):
             continue
-        if s.asn and s.asn in HOSTING_ASNS:
+        if s.asn in allow or s.asn in egress:
+            continue
+        tag = _hosting_tag(s, asnmap)
+        if tag:
             out.append(Finding(
                 "hosting-asn", s.upn, s.ts,
-                f"interactive auth from hosting ASN{s.asn} ({s.ip})"))
-            continue
-        if asnmap:
-            label = _asn_label(s.ip, asnmap)
-            if label and any(h in label for h in HOSTING_HINTS):
-                out.append(Finding(
-                    "hosting-asn", s.upn, s.ts,
-                    f"interactive auth from hosting '{label}' "
-                    f"({s.ip})"))
+                f"interactive auth from {tag} ({s.ip})"))
     return out
 
 
@@ -312,13 +352,14 @@ def correlate(findings):
     return findings + out
 
 
-def evaluate(signins, audits=(), baselines=None, asnmap=None):
+def evaluate(signins, audits=(), baselines=None, asnmap=None,
+             allow_asn=()):
     """All rules + correlation -> finding list."""
     baselines = baselines or {}
     out = []
-    out += session_replay(signins, asnmap)
+    out += session_replay(signins, baselines, asnmap, allow_asn)
     out += impossible_travel(signins)
-    out += hosting_asn(signins, asnmap)
+    out += hosting_asn(signins, asnmap, baselines, allow_asn)
     out += device_code(signins, baselines)
     out += rare_country(signins, baselines)
     out += mfa_method_add(audits)

@@ -14,6 +14,7 @@ from pathlib import Path
 class Baseline:
     countries: set = field(default_factory=set)
     ips: set = field(default_factory=set)
+    asns: set = field(default_factory=set)   # networks the user roams on
     client_apps: set = field(default_factory=set)
     apps: set = field(default_factory=set)
     device_code_used: bool = False
@@ -24,6 +25,7 @@ class Baseline:
         return {
             "countries": sorted(self.countries),
             "ips": sorted(self.ips),
+            "asns": sorted(self.asns),
             "client_apps": sorted(self.client_apps),
             "apps": sorted(self.apps),
             "device_code_used": self.device_code_used,
@@ -36,6 +38,7 @@ class Baseline:
         return Baseline(
             countries=set(d.get("countries") or []),
             ips=set(d.get("ips") or []),
+            asns=set(d.get("asns") or []),
             client_apps=set(d.get("client_apps") or []),
             apps=set(d.get("apps") or []),
             device_code_used=bool(d.get("device_code_used")),
@@ -54,6 +57,8 @@ def build(signins):
             b.countries.add(s.country)
         if s.ip:
             b.ips.add(s.ip)
+        if s.asn:
+            b.asns.add(s.asn)
         if s.client_app:
             b.client_apps.add(s.client_app)
         if s.app:

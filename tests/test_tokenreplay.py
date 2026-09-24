@@ -24,6 +24,17 @@ def _baseline(upn, **kw):
     return {upn: bl.Baseline(**kw)}
 
 
+def _mk(upn="u@x", ip="1.2.3.4", country="US", asn=7018,
+        session="sess-1", ts=1000.0, interactive=True, ok=True,
+        protocol=""):
+    return si.SignIn(id="x", ts=ts, upn=upn, ip=ip, country=country,
+                     lat=40.0, lon=-74.0, app="a", client_app="",
+                     os="", browser="", interactive=interactive,
+                     mfa=True, protocol=protocol, session_id=session,
+                     asn=asn, event_types=set(), ok=ok, risk="",
+                     network_type="")
+
+
 class TestParsing(unittest.TestCase):
     def test_envelope_and_bare_array(self):
         env = si.parse_signins(SIGNINS)
@@ -76,6 +87,48 @@ class TestEvidence(unittest.TestCase):
         by_user = {f.user: f for f in out}
         self.assertIn("14061", by_user["erin@corp.com"].detail)
         self.assertIn("16276", by_user["dave@corp.com"].detail)
+
+    def test_replay_mobile_roaming_is_drift_not_replay(self):
+        """Phone moving home-wifi <-> cellular: ASN change on networks
+        the user already has history on = info, not COMPROMISED."""
+        rows = [_mk(upn="mob@x", asn=7018, ip="1.1.1.1", ts=100),
+                _mk(upn="mob@x", asn=7922, ip="2.2.2.2", ts=200)]
+        base = _baseline("mob@x", countries={"US"},
+                         asns={7018, 7922})
+        out = evidence.session_replay(rows, baselines=base)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].rule, "session-network-drift")
+
+    def test_replay_new_asn_for_user_fires(self):
+        rows = [_mk(upn="mob@x", asn=7018, ts=100),
+                _mk(upn="mob@x", asn=44444, ip="9.9.9.9", ts=200)]
+        base = _baseline("mob@x", countries={"US"}, asns={7018, 7922})
+        out = evidence.session_replay(rows, baselines=base)
+        self.assertEqual(out[0].rule, "session-replay")
+        self.assertIn("never seen", out[0].detail)
+
+    def test_replay_no_baseline_nonhosting_is_drift(self):
+        """No baseline -> can't prove the new network is new; only
+        hosting still forces the real finding."""
+        rows = [_mk(asn=7018, ts=100), _mk(asn=7922, ip="9.9.9.9",
+                                          ts=200)]
+        out = evidence.session_replay(rows, baselines={})
+        self.assertEqual(out[0].rule, "session-network-drift")
+        rows[1].asn = 14061
+        out = evidence.session_replay(rows, baselines={})
+        self.assertEqual(out[0].rule, "session-replay")
+
+    def test_hosting_asn_tenant_egress_suppresses(self):
+        """AS14061 in >=3 users' baselines = shared SASE egress, not a
+        VPS — hosting_asn must not flag the whole tenant."""
+        base = {u: bl.Baseline(asns={14061})
+                for u in ("a@x", "b@x", "c@x")}
+        rows = [_mk(upn="d@x", asn=14061, ip="203.0.113.9")]
+        self.assertEqual(
+            evidence.hosting_asn(rows, None, baselines=base), [])
+        # allow-asn manual override also suppresses
+        self.assertEqual(
+            evidence.hosting_asn(rows, None, allow_asn={14061}), [])
 
     def test_hosting_asn_map_override(self):
         """--asnmap labels stay an override for numbers we don't carry."""

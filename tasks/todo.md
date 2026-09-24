@@ -58,3 +58,19 @@ session_replay logic bug found by the live fixture run, not unit tests:
 `or hosting` made single-record sessions "replayed". Fixed: replay
 requires >=2 distinct networks; single hosting sign-in belongs to
 hosting_asn.
+
+## Round 3 — real-tenant FP gates (2026-09-23)
+- [x] session-replay FP gate: the new sighting must be hosting OR
+      never-seen-for-user (baseline.asns). Carrier roaming between
+      known ASNs -> session-network-drift (10, info). No baseline ->
+      only hosting forces replay; conservative.
+- [x] tenant-egress gate: ASN in >=3 users' baselines = shared egress
+      (SASE/WARP/VDI), suppresses hosting-asn tenant-wide.
+      --allow-asn manual override on analyze + poll.
+- [x] baselines learned asns per user (needed by both gates).
+- [x] 29 tests green; fixture verdicts unchanged.
+
+## Review addendum
+Both gates reuse the baselines file — no new state. The mobile-roam
+case is why the ASN-keyed replay needed the second clause: "network
+changed" alone would flag every phone user hourly.

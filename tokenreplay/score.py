@@ -16,6 +16,9 @@ WEIGHTS = {
     "impossible-travel":       45,   # physics violation between sign-ins
     "mfa-method-add":          35,   # security-info registration, uncorrelated
     "rare-country":            20,   # first-seen country — weak alone
+    "session-network-drift":   10,   # session moved networks but all
+                                     # known-for-user — mobile roaming
+                                     # shape, info only
 }
 
 FORCE_COMPROMISED = {"session-replay", "persistence-correlated"}

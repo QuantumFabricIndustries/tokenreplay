@@ -32,8 +32,9 @@ def cmd_analyze(a):
         warnings.append("no --asnmap and records lack "
                         "autonomousSystemNumber; hosting-ASN evidence "
                         "unavailable")
+    allow_asn = {int(x) for x in (a.allow_asn or "").split(",") if x}
     findings = evidence.evaluate(signins, audits, baselines=base,
-                                 asnmap=asnmap)
+                                 asnmap=asnmap, allow_asn=allow_asn)
     result = score.score(findings)
     recs = evidence.recommendations(findings)
     out = report.render(result, as_json=a.json,
@@ -89,7 +90,9 @@ def cmd_poll(a):
     parsed_a = si.parse_audits({"value": audits})
     base = bl.load(_state_dir() / "baselines.json") \
         if (_state_dir() / "baselines.json").exists() else {}
-    findings = evidence.evaluate(parsed_s, parsed_a, baselines=base)
+    allow_asn = {int(x) for x in (a.allow_asn or "").split(",") if x}
+    findings = evidence.evaluate(parsed_s, parsed_a, baselines=base,
+                                 allow_asn=allow_asn)
     result = score.score(findings)
     warnings = list(evidence.coverage_warnings(parsed_s))
     recs = evidence.recommendations(findings)
@@ -117,6 +120,9 @@ def main(argv=None):
     a.add_argument("--audits", help="directoryAudits JSON export")
     a.add_argument("--baselines", help="per-user baselines JSON")
     a.add_argument("--asnmap", help='{"prefixes": {"cidr": "label"}}')
+    a.add_argument("--allow-asn",
+                   help="comma-separated ASN numbers to suppress "
+                        "(known corporate egress)")
     a.add_argument("--json", action="store_true")
     a.add_argument("-o", "--output")
     a.set_defaults(fn=cmd_analyze)
@@ -135,6 +141,8 @@ def main(argv=None):
     w = sub.add_parser("poll", help="collect via Graph (needs config)")
     w.add_argument("--hours", type=int, default=1,
                    help="initial lookback when no watermark (default 1)")
+    w.add_argument("--allow-asn",
+                   help="comma-separated ASN numbers to suppress")
     w.add_argument("--json", action="store_true")
     w.set_defaults(fn=cmd_poll)
 
