@@ -245,16 +245,66 @@ class TestScoring(unittest.TestCase):
 class TestBaselines(unittest.TestCase):
     def test_build_and_roundtrip(self):
         built = bl.build(_signins())
-        self.assertIn("dave@corp.com", built)
-        self.assertTrue(built["dave@corp.com"].device_code_used)
-        self.assertIn("SG", built["carol@corp.com"].countries)
+        self.assertIn("alice@corp.com", built)   # unflagged -> learned
+        self.assertIn("US", built["alice@corp.com"].countries)
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "b.json"
             bl.save(p, built)
             loaded = bl.load(p)
             self.assertEqual(
-                loaded["carol@corp.com"].countries,
-                built["carol@corp.com"].countries)
+                loaded["alice@corp.com"].countries,
+                built["alice@corp.com"].countries)
+
+    def test_build_excludes_flagged(self):
+        """Anti-poisoning: sign-ins behind SUSPICIOUS+ findings are not
+        learned — an attacker VPS in history can't launder itself into
+        per-user baselines or tenant egress."""
+        built = bl.build(_signins())
+        # bob/carol/dave/erin rows are all implicated (replay, travel,
+        # hosting, device-code) -> not learned
+        self.assertNotIn("bob@corp.com", built)
+        self.assertNotIn("dave@corp.com", built)
+        self.assertNotIn("erin@corp.com", built)
+        self.assertNotIn("carol@corp.com", built)
+
+    def test_build_include_flagged_escape_hatch(self):
+        built = bl.build(_signins(), exclude_flagged=False)
+        self.assertIn("dave@corp.com", built)
+        self.assertTrue(built["dave@corp.com"].device_code_used)
+        self.assertIn("SG", built["carol@corp.com"].countries)
+
+    def test_update_skips_flagged(self):
+        base = {}
+        bad = _mk(upn="v@x", asn=14061, ip="203.0.113.9")
+        good = _mk(upn="v@x", asn=7018, ip="1.1.1.1", session="s2")
+        bl.update(base, [bad, good], flagged={id(bad)})
+        self.assertEqual(base["v@x"].asns, {7018})
+
+    def test_confirm_learns_asn(self):
+        base = {}
+        bl.confirm(base, "v@x", 14061)
+        self.assertEqual(base["v@x"].asns, {14061})
+        self.assertEqual(base["v@x"].confirmed_asns, {14061})
+        # survives save/load
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "b.json"
+            bl.save(p, base)
+            self.assertEqual(bl.load(p)["v@x"].confirmed_asns,
+                             {14061})
+
+    def test_egress_scaled_threshold_for_hosting(self):
+        """Hosting ASNs need max(3, 20% of tenant users) to promote to
+        egress; non-hosting keep the flat 3."""
+        # 30-user tenant -> hosting needs 6; 4 sharers is an attacker
+        # VPS covering victims, not egress
+        base = {f"u{i}@x": bl.Baseline(
+                    asns={14061} if i < 4 else {7018})
+                for i in range(30)}
+        self.assertNotIn(14061, evidence._tenant_egress(base))
+        self.assertIn(7018, evidence._tenant_egress(base))
+        for i in range(4, 6):
+            base[f"u{i}@x"].asns.add(14061)   # 6 sharers -> egress
+        self.assertIn(14061, evidence._tenant_egress(base))
 
 
 class TestCli(unittest.TestCase):
@@ -279,6 +329,20 @@ class TestCli(unittest.TestCase):
                            "-o", str(out)])
             self.assertEqual(rc, 0)
             self.assertTrue(out.exists())
+
+    def test_baselines_confirm_cmd(self):
+        with tempfile.TemporaryDirectory() as td:
+            b = Path(td) / "b.json"
+            bl.save(b, {"v@x": bl.Baseline()})
+            rc = cli.main(["baselines", "confirm",
+                           "--baselines", str(b),
+                           "--user", "v@x", "--asn", "14061"])
+            self.assertEqual(rc, 0)
+            self.assertEqual(bl.load(b)["v@x"].asns, {14061})
+            # missing args -> usage error
+            self.assertEqual(
+                cli.main(["baselines", "confirm",
+                          "--baselines", str(b)]), 2)
 
 
 if __name__ == "__main__":

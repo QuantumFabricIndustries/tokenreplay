@@ -53,12 +53,35 @@ def cmd_analyze(a):
 
 
 def cmd_baselines(a):
+    if a.verb == "confirm":
+        if not a.user or a.asn is None:
+            print("baselines confirm needs --user and --asn",
+                  file=sys.stderr)
+            return 2
+        dest = a.baselines or str(_state_dir() / "baselines.json")
+        p = Path(dest)
+        base = bl.load(p) if p.exists() else {}
+        bl.confirm(base, a.user, a.asn)
+        _state_dir().mkdir(parents=True, exist_ok=True)
+        bl.save(dest, base)
+        print(f"confirmed AS{a.asn} for {a.user} -> {dest}")
+        return 0
+    if not a.file:
+        print("baselines build needs --file", file=sys.stderr)
+        return 2
     signins = si.parse_signins(_load_json(a.file))
-    built = bl.build(signins)
+    asnmap = evidence.load_asnmap(_load_json(a.asnmap)) \
+        if a.asnmap else None
+    allow_asn = {int(x) for x in (a.allow_asn or "").split(",") if x}
+    built = bl.build(signins, asnmap=asnmap, allow_asn=allow_asn,
+                     exclude_flagged=not a.include_flagged)
     dest = a.output or str(_state_dir() / "baselines.json")
     _state_dir().mkdir(parents=True, exist_ok=True)
     bl.save(dest, built)
-    print(f"baselines for {len(built)} user(s) -> {dest}")
+    print(f"baselines for {len(built)} user(s) -> {dest}"
+          + ("" if a.include_flagged else
+             " (flagged sign-ins excluded - 'baselines confirm' "
+             "approves them)"))
     return 0
 
 
@@ -93,6 +116,10 @@ def cmd_poll(a):
     allow_asn = {int(x) for x in (a.allow_asn or "").split(",") if x}
     findings = evidence.evaluate(parsed_s, parsed_a, baselines=base,
                                  allow_asn=allow_asn)
+    # learn unflagged sign-ins into baselines; flagged rows stay out
+    # until `baselines confirm` approves them (anti-poisoning)
+    bl.update(base, parsed_s,
+              flagged=evidence.implicated_rows(findings))
     result = score.score(findings)
     warnings = list(evidence.coverage_warnings(parsed_s))
     recs = evidence.recommendations(findings)
@@ -104,6 +131,8 @@ def cmd_poll(a):
     (_state_dir() / "last_report.json").write_text(
         report.render(result, as_json=True, warnings=warnings,
                       recs=recs), encoding="utf-8")
+    if base:
+        bl.save(_state_dir() / "baselines.json", base)
     return 0 if result["_overall"]["verdict"] in ("CLEAN", "SUSPICIOUS") \
         else 1
 
@@ -128,9 +157,18 @@ def main(argv=None):
     a.set_defaults(fn=cmd_analyze)
 
     b = sub.add_parser("baselines",
-                       help="build per-user baselines from history")
-    b.add_argument("verb", choices=["build"])
-    b.add_argument("--file", required=True)
+                       help="build baselines / confirm flagged ASN")
+    b.add_argument("verb", choices=["build", "confirm"])
+    b.add_argument("--file", help="signIns JSON export (build)")
+    b.add_argument("--baselines", help="baselines JSON path (confirm)")
+    b.add_argument("--user", help="UPN to confirm (confirm)")
+    b.add_argument("--asn", type=int, help="ASN to confirm (confirm)")
+    b.add_argument("--asnmap", help='{"prefixes": {"cidr": "label"}}')
+    b.add_argument("--allow-asn",
+                   help="comma-separated ASNs to suppress")
+    b.add_argument("--include-flagged", action="store_true",
+                   help="learn from ALL sign-ins including flagged "
+                        "ones - only for known-clean windows")
     b.add_argument("-o", "--output")
     b.set_defaults(fn=cmd_baselines)
 

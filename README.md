@@ -35,7 +35,7 @@ exported Graph JSON — no API access needed to develop, test, or triage.
 | `session-network-drift` | 10, info | session moved networks but all of them are known-for-user or unverifiable — mobile-roaming shape, not replay |
 | `persistence-correlated` | 90, forces COMPROMISED | security-info/MFA-method registration within 72h of any other flag for that user — the capture-then-persist chain (ShinyHunters/Helix play) |
 | `device-code-tenant` | 65 | device-code auth when the TENANT has no device-code history — the flow isn't legitimate here at all |
-| `hosting-asn` | 55 | interactive auth from a hosting ASN — matched on the record's own `autonomousSystemNumber` vs a bundled list (DO/Hetzner/OVH/AWS/GCP/Azure/…), `--asnmap` CIDR labels as override. Tenant-egress gate: an ASN in ≥3 users' baselines is shared egress (Zscaler/WARP/VDI/Private Relay) and suppressed; `--allow-asn` suppresses manually |
+| `hosting-asn` | 55 | interactive auth from a hosting ASN — matched on the record's own `autonomousSystemNumber` vs a bundled list (DO/Hetzner/OVH/AWS/GCP/Azure/…), `--asnmap` CIDR labels as override. Tenant-egress gate: an ASN shared by enough users' baselines is shared egress (Zscaler/WARP/VDI/Private Relay) and suppressed — flat 3 users for ordinary ASNs, `max(3, 20% of tenant)` for hosting-listed ones (an attacker VPS only covers a handful of victims; real SASE covers most of the tenant). `--allow-asn` suppresses manually |
 | `device-code-flow` | 55 | device-code auth with no user history, or from an unseen country |
 | `impossible-travel` | 45 | consecutive sign-ins faster than physics |
 | `mfa-method-add` | 35 | security-info registration, uncorrelated |
@@ -58,6 +58,9 @@ python -m tokenreplay analyze --file signins.json [--audits a.json]
     [--baselines b.json] [--asnmap m.json] [--allow-asn 13335,16509]
     [--json] [-o out]
 python -m tokenreplay baselines build --file history.json [-o b.json]
+    [--asnmap m.json] [--allow-asn ...] [--include-flagged]
+python -m tokenreplay baselines confirm --baselines b.json
+    --user alice@corp.com --asn 14061
 python -m tokenreplay report [--json]
 python -m tokenreplay poll [--hours N]          # phase 2
 ```
@@ -114,6 +117,15 @@ Premium trial tenant is the simplest way to get one.
 - **Baselines are only as old as the history export.** A brand-new
   account or thin history makes "first-seen" evidence noisy — cap rules
   exist for that reason.
+- **Baselines refuse to learn flagged traffic.** `build` and `poll`
+  evaluate sign-ins *before* learning them: any record implicated in a
+  SUSPICIOUS+ finding stays out of `asns`/`countries`/etc. — otherwise
+  an attacker's VPS in 30 days of history would launder itself into
+  "known" per-user networks and eventually "shared egress". Flagged
+  networks only enter via `baselines confirm` (recorded in
+  `confirmed_asns` as an audit trail). `--include-flagged` is the
+  escape hatch for known-clean windows. `poll` updates
+  `baselines.json` each cycle under the same exclusion.
 - **Passkey/FIDO-bound tokens shrink the replay window but don't close
   it** — AiTM still captures what the proxy completes.
 

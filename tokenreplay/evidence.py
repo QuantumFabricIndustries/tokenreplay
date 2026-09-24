@@ -16,6 +16,9 @@ class Finding:
     user: str
     ts: float
     detail: str
+    rows: tuple = ()   # implicated SignIn records — excluded from
+                       # baseline learning so flagged traffic can't
+                       # poison history
 
 
 # substring match on the ASN/prefix label — covers the VPS fleets the
@@ -72,15 +75,27 @@ def _users(signins):
 
 
 def _tenant_egress(baselines, min_users=3):
-    """ASNs shared by >=min_users different tenant users are shared
-    egress — Zscaler/WARP/Netskope/corporate VPN/VDI all put real users
-    on AWS/Azure/GCP/Cloudflare ASNs. Treat them as infrastructure, not
-    an attacker's VPS."""
+    """ASNs shared by enough different tenant users are shared egress —
+    Zscaler/WARP/Netskope/corporate VPN/VDI all put real users on
+    AWS/Azure/GCP/Cloudflare ASNs.
+
+    Hosting-listed ASNs are harder to promote: real SASE egress covers
+    most of the tenant while an attacker VPS covers a handful of
+    victims, so they need max(min_users, 20% of tenant users) instead
+    of the flat floor. On very small tenants the floor still binds —
+    `--allow-asn` is the reliable declaration there."""
+    import math
     users_per_asn = {}
     for b in baselines.values():
         for a in b.asns:
             users_per_asn[a] = users_per_asn.get(a, 0) + 1
-    return {a for a, n in users_per_asn.items() if n >= min_users}
+    hosting_min = max(min_users, math.ceil(0.2 * len(baselines)))
+    out = set()
+    for a, n in users_per_asn.items():
+        need = hosting_min if a in HOSTING_ASNS else min_users
+        if n >= need:
+            out.add(a)
+    return out
 
 
 def _hosting_tag(row, asnmap):
@@ -139,15 +154,16 @@ def session_replay(signins, baselines=None, asnmap=None, allow_asn=()):
                 return f"first-seen country {r.country}"
             return ""
 
-        hits = [tag for r in rows[1:] if (tag := suspicious(r))]
+        hits = [(r, tag) for r in rows[1:] if (tag := suspicious(r))]
         if hits:
             out.append(Finding(
                 "session-replay", upn, rows[0].ts,
                 f"session {sess[:8]}... replayed from a different "
                 f"network: ASNs {sorted(asns) or ips}; "
-                f"{'; '.join(sorted(set(hits)))}"
+                f"{'; '.join(sorted({t for _, t in hits}))}"
                 + (f" across {sorted(countries)}"
-                   if len(countries) >= 2 else "")))
+                   if len(countries) >= 2 else ""),
+                rows=tuple(r for r, _ in hits)))
         else:
             out.append(Finding(
                 "session-network-drift", upn, rows[0].ts,
@@ -172,7 +188,7 @@ def impossible_travel(signins, max_kmh=900, min_km=500):
                         "impossible-travel", upn, s.ts,
                         f"{prev.country}->{s.country} "
                         f"{km:.0f}km in {(s.ts-prev.ts)/60:.0f}min "
-                        f"({kmh:.0f}km/h)"))
+                        f"({kmh:.0f}km/h)", rows=(prev, s)))
             prev = s
     return out
 
@@ -220,7 +236,7 @@ def hosting_asn(signins, asnmap, baselines=None, allow_asn=()):
         if tag:
             out.append(Finding(
                 "hosting-asn", s.upn, s.ts,
-                f"interactive auth from {tag} ({s.ip})"))
+                f"interactive auth from {tag} ({s.ip})", rows=(s,)))
     return out
 
 
@@ -247,16 +263,17 @@ def device_code(signins, baselines):
                 "device-code-tenant", s.upn, s.ts,
                 "device-code auth but the TENANT has no device-code "
                 "history - the flow isn't legitimate here "
-                "(EvilTokens pattern)"))
+                "(EvilTokens pattern)", rows=(s,)))
         elif b is None or not b.device_code_used:
             out.append(Finding(
                 "device-code-flow", s.upn, s.ts,
                 "device-code auth with NO prior device-code usage for "
-                "this account (EvilTokens pattern)"))
+                "this account (EvilTokens pattern)", rows=(s,)))
         elif s.country and s.country not in b.countries:
             out.append(Finding(
                 "device-code-flow", s.upn, s.ts,
-                f"device-code auth from unseen country {s.country}"))
+                f"device-code auth from unseen country {s.country}",
+                rows=(s,)))
     return out
 
 
@@ -325,7 +342,22 @@ def rare_country(signins, baselines):
             out.append(Finding(
                 "rare-country", s.upn, s.ts,
                 f"interactive auth from first-seen country "
-                f"{s.country} (baseline: {len(b.countries)} known)"))
+                f"{s.country} (baseline: {len(b.countries)} known)",
+                rows=(s,)))
+    return out
+
+
+def implicated_rows(findings, min_weight=20):
+    """id()s of sign-in records behind findings >=min_weight — the set
+    baseline learning must skip. SUSPICIOUS+ traffic stays out of
+    history until an admin confirms it (baselines confirm); info-level
+    findings like session-network-drift still learn (mobile roaming is
+    legitimately new)."""
+    from .score import WEIGHTS
+    out = set()
+    for f in findings:
+        if WEIGHTS.get(f.rule, 0) >= min_weight:
+            out.update(id(r) for r in f.rows)
     return out
 
 

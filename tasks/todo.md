@@ -74,3 +74,27 @@ hosting_asn.
 Both gates reuse the baselines file — no new state. The mobile-roam
 case is why the ASN-keyed replay needed the second clause: "network
 changed" alone would flag every phone user hourly.
+
+## Round 4 — baseline anti-poisoning (2026-09-23)
+- [x] Finding.rows: every sign-in rule records the implicated records.
+- [x] implicated_rows(findings, min_weight=20) -> id() set; SUSPICIOUS+
+      traffic is excluded from learning (drift=10 still learns —
+      mobile roaming legitimately produces new ASNs).
+- [x] baselines.build evaluates first, skips implicated rows;
+      --include-flagged escape hatch for known-clean windows.
+- [x] baselines.update + poll wiring: poll now learns each cycle under
+      the same exclusion (evaluate BEFORE update, so a replay row in
+      this window can't teach itself known).
+- [x] baselines confirm --user U --asn N: explicit safe-mark, lands in
+      asns + confirmed_asns audit trail.
+- [x] egress scaled threshold: hosting ASNs need max(3, 20% of tenant
+      users); flat 3 for ordinary ASNs. Small tenants (<15) still floor
+      at 3 -> --allow-asn is the reliable declaration there.
+- [x] 35 tests green.
+
+## Review addendum
+The poisoning path was: attacker VPS sign-ins -> learned into baselines
+-> 3 victims sharing it -> promoted to "egress" -> suppressed for the
+whole tenant, covering the NEXT victims. Both fixes break the chain at
+different points: exclusion stops the ASN entering baselines at all;
+the scaled threshold means even leaked hosting ASNs need ~20% coverage.
