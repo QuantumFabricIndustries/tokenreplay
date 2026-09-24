@@ -110,3 +110,24 @@ the scaled threshold means even leaked hosting ASNs need ~20% coverage.
       victim's real network AND the attacker VPS under one user;
       approving must not blanket-trust the user.
 - [x] 36 tests green.
+
+## Round 5 — Graph credential hardening (2026-09-23)
+- [x] collect.auth_params: cert_thumbprint > env TOKENREPLAY_CLIENT_SECRET
+      > client_secret_dpapi; plaintext client_secret REFUSED with
+      migration hint.
+- [x] cert path: RS256 JWT client assertion signed in the Windows store
+      via PowerShell (GetRSAPrivateKey.SignData) - NonExportable works
+      because the key never enters this process. Thumbprint/store
+      validated before interpolation into PowerShell.
+- [x] `tokenreplay cert new` (non-exportable RSA-2048, exports .cer,
+      rewrites graph.json, strips secrets) + `secret protect` (DPAPI
+      migration in place, atomic write).
+- [x] 43 tests green incl. real DPAPI round-trip + CLI migration.
+- [x] LIVE: tasks/live_cert_proof.py - real cert created, JWT signed via
+      the production path, signature verified against the public .cer,
+      Export-PfxCertificate REFUSED ("Cannot export non-exportable
+      private key"), cert + key removed.
+- [x] tokenwatch: tokenreplay-graph store spec (kind=config so a
+      plaintext secret is plaintext-token, not expected storage) +
+      entra-client-secret pattern (Q~ format). Cross-checked: plaintext
+      graph.json -> plaintext-token; cert config -> clean.

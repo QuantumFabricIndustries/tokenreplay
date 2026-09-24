@@ -118,9 +118,13 @@ def cmd_report(a):
 def cmd_poll(a):
     try:
         signins, audits = collect.poll(lookback_s=a.hours * 3600)
+    except collect.CredentialError as e:
+        print(f"poll: {e}", file=sys.stderr)
+        return 2
     except (OSError, json.JSONDecodeError, KeyError) as e:
-        print(f"poll needs ~/.tokenreplay/graph.json "
-              f"(tenant/client_id/client_secret): {e}", file=sys.stderr)
+        print(f"poll needs ~/.tokenreplay/graph.json (tenant, client_id "
+              f"+ cert_thumbprint or client_secret_dpapi): {e}",
+              file=sys.stderr)
         return 2
     parsed_s = si.parse_signins({"value": signins})
     parsed_a = si.parse_audits({"value": audits})
@@ -148,6 +152,57 @@ def cmd_poll(a):
         bl.save(_state_dir() / "baselines.json", base)
     return 0 if result["_overall"]["verdict"] in ("CLEAN", "SUSPICIOUS") \
         else 1
+
+
+def _load_cfg_or_empty():
+    try:
+        return collect.load_config()
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def cmd_secret(a):
+    """Migrate a plaintext client_secret to a DPAPI blob (user scope)."""
+    cfg = _load_cfg_or_empty()
+    secret = cfg.pop("client_secret", None)
+    if not secret:
+        import getpass
+        secret = getpass.getpass("client secret (input hidden): ").strip()
+    if not secret:
+        print("no secret given", file=sys.stderr)
+        return 2
+    try:
+        cfg["client_secret_dpapi"] = collect.dpapi_protect(secret)
+    except collect.CredentialError as e:
+        print(f"secret protect: {e}", file=sys.stderr)
+        return 2
+    collect.save_config(cfg)
+    print("client secret stored DPAPI-encrypted (decrypts only as this "
+          "Windows user); plaintext removed from graph.json.\n"
+          "The old plaintext may survive in backups/free space - rotate "
+          "the secret in Entra, or better: `tokenreplay cert new`.")
+    return 0
+
+
+def cmd_cert(a):
+    """Create a non-exportable cert and point graph.json at it."""
+    try:
+        thumb = collect.new_cert(a.out, store=a.store)
+    except collect.CredentialError as e:
+        print(f"cert new: {e}", file=sys.stderr)
+        return 2
+    cfg = _load_cfg_or_empty()
+    cfg.update({"cert_thumbprint": thumb, "cert_store": a.store})
+    removed = [k for k in ("client_secret", "client_secret_dpapi")
+               if cfg.pop(k, None)]
+    collect.save_config(cfg)
+    print(f"cert {thumb} in Cert:\\{a.store}\\My (private key "
+          f"NON-EXPORTABLE); public cert -> {a.out}\n"
+          "Next: Entra > App registrations > <app> > Certificates & "
+          "secrets > Upload certificate, then DELETE the client secret.")
+    if removed:
+        print(f"removed {', '.join(removed)} from graph.json")
+    return 0
 
 
 def main(argv=None):
@@ -196,6 +251,18 @@ def main(argv=None):
                    help="comma-separated ASN numbers to suppress")
     w.add_argument("--json", action="store_true")
     w.set_defaults(fn=cmd_poll)
+
+    s = sub.add_parser("secret", help="DPAPI-encrypt the Graph secret")
+    s.add_argument("verb", choices=["protect"])
+    s.set_defaults(fn=cmd_secret)
+
+    c = sub.add_parser("cert", help="create a non-exportable Graph cert")
+    c.add_argument("verb", choices=["new"])
+    c.add_argument("--out", default="tokenreplay-graph.cer",
+                   help="public cert to upload (default %(default)s)")
+    c.add_argument("--store", default="CurrentUser",
+                   choices=["CurrentUser", "LocalMachine"])
+    c.set_defaults(fn=cmd_cert)
 
     args = p.parse_args(argv)
     return args.fn(args)

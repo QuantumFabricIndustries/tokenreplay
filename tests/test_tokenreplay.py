@@ -1,9 +1,14 @@
+import base64
 import json
+import os
+import sys
 import tempfile
 import unittest
+import urllib.parse
 from pathlib import Path
+from unittest import mock
 
-from tokenreplay import (baselines as bl, cli, evidence, score,
+from tokenreplay import (baselines as bl, cli, collect, evidence, score,
                          signins as si)
 
 FIX = Path(__file__).parent / "fixtures"
@@ -364,6 +369,117 @@ class TestCli(unittest.TestCase):
             self.assertEqual(
                 cli.main(["baselines", "confirm",
                           "--baselines", str(b)]), 2)
+
+
+class TestCredentials(unittest.TestCase):
+    CFG = {"tenant": "t-1", "client_id": "app-1"}
+    THUMB = "AB" * 20
+
+    def _capture_opener(self):
+        sent = {}
+
+        class Resp:
+            def __init__(self, body):
+                self.body = body
+
+            def read(self):
+                return self.body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def opener(req, timeout=0):
+            sent["url"] = req.full_url
+            sent["data"] = dict(urllib.parse.parse_qsl(req.data.decode()))
+            return Resp(b'{"access_token": "tok"}')
+        return opener, sent
+
+    def test_plaintext_secret_refused(self):
+        cfg = dict(self.CFG, client_secret="abc123Q~plaintext")
+        with self.assertRaises(collect.CredentialError) as cm:
+            collect.auth_params(cfg, env={})
+        self.assertIn("secret protect", str(cm.exception))
+        self.assertIn("cert new", str(cm.exception))
+
+    def test_no_credential_errors(self):
+        with self.assertRaises(collect.CredentialError):
+            collect.auth_params(dict(self.CFG), env={})
+
+    def test_env_secret_beats_dpapi_blob(self):
+        cfg = dict(self.CFG, client_secret_dpapi="not-a-real-blob")
+        p = collect.auth_params(cfg, env={collect.SECRET_ENV: "from-env"})
+        self.assertEqual(p, {"client_secret": "from-env"})
+
+    def test_cert_assertion_no_secret_sent(self):
+        """Cert path posts a signed JWT assertion and never a
+        client_secret, even if a stale one is still in the config."""
+        calls = []
+
+        def runner(args):
+            calls.append(args[-1])
+            return 0, base64.b64encode(b"sig-bytes").decode() + "\n", ""
+        cfg = dict(self.CFG, cert_thumbprint=self.THUMB,
+                   client_secret="stale")
+        opener, sent = self._capture_opener()
+        tok = collect.get_token(cfg, opener=opener, env={}, runner=runner)
+        self.assertEqual(tok, "tok")
+        self.assertNotIn("client_secret", sent["data"])
+        self.assertEqual(sent["data"]["client_assertion_type"],
+                         "urn:ietf:params:oauth:client-assertion-type:"
+                         "jwt-bearer")
+        h, c, s = sent["data"]["client_assertion"].split(".")
+        pad = lambda x: x + "=" * (-len(x) % 4)
+        header = json.loads(base64.urlsafe_b64decode(pad(h)))
+        claims = json.loads(base64.urlsafe_b64decode(pad(c)))
+        self.assertEqual(header["alg"], "RS256")
+        self.assertEqual(base64.urlsafe_b64decode(pad(header["x5t"])),
+                         bytes.fromhex(self.THUMB))
+        self.assertEqual(claims["aud"], "https://login.microsoftonline.com"
+                         "/t-1/oauth2/v2.0/token")
+        self.assertEqual(claims["iss"], "app-1")
+        self.assertEqual(claims["sub"], "app-1")
+        self.assertLessEqual(claims["exp"] - claims["iat"], 600)
+        self.assertEqual(base64.urlsafe_b64decode(pad(s)), b"sig-bytes")
+        self.assertIn(f"Cert:\\CurrentUser\\My\\{self.THUMB}", calls[0])
+
+    def test_cert_thumbprint_validated(self):
+        """Thumbprint/store are interpolated into PowerShell - reject
+        anything that isn't 40 hex chars / a known store."""
+        for bad in ({"cert_thumbprint": "AB';calc;'"},
+                    {"cert_thumbprint": self.THUMB,
+                     "cert_store": "CurrentUser';calc"}):
+            with self.assertRaises(collect.CredentialError):
+                collect.client_assertion(dict(self.CFG, **bad),
+                                         runner=lambda a: (0, "", ""))
+
+    def test_cert_sign_failure_surfaces(self):
+        cfg = dict(self.CFG, cert_thumbprint=self.THUMB)
+        with self.assertRaises(collect.CredentialError) as cm:
+            collect.client_assertion(
+                cfg, runner=lambda a: (1, "", "Cannot find path"))
+        self.assertIn("Cannot find path", str(cm.exception))
+
+    @unittest.skipUnless(sys.platform == "win32", "DPAPI is Windows-only")
+    def test_dpapi_roundtrip_and_migration(self):
+        blob = collect.dpapi_protect("s3cret-Q~value")
+        self.assertNotIn("s3cret", base64.b64decode(blob).decode(
+            "latin-1"))
+        self.assertEqual(collect.dpapi_unprotect(blob), "s3cret-Q~value")
+        with tempfile.TemporaryDirectory() as td:
+            env = {"TOKENREPLAY_HOME": td}
+            (Path(td) / "graph.json").write_text(json.dumps(
+                dict(self.CFG, client_secret="s3cret-Q~value")))
+            with mock.patch.dict(os.environ, env):
+                self.assertEqual(cli.main(["secret", "protect"]), 0)
+            cfg = json.loads((Path(td) / "graph.json").read_text())
+            self.assertNotIn("client_secret", cfg)
+            self.assertNotIn("s3cret", (Path(td) / "graph.json")
+                             .read_text())
+            self.assertEqual(collect.auth_params(cfg, env={}),
+                             {"client_secret": "s3cret-Q~value"})
 
 
 if __name__ == "__main__":

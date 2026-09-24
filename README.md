@@ -69,12 +69,34 @@ python -m tokenreplay poll [--hours N]          # phase 2
 
 `collect.py` implements the client-credentials daemon flow against
 Microsoft Graph (`/auditLogs/signIns`, `/auditLogs/directoryAudits`,
-watermarked, paged). Config at `~/.tokenreplay/graph.json`:
+watermarked, paged). Config at `~/.tokenreplay/graph.json` holds
+`tenant` + `client_id` plus ONE credential, resolved strongest-first:
+
+| source | how | on disk |
+|---|---|---|
+| **certificate** (recommended) | `tokenreplay cert new` - RSA-2048, private key **non-exportable** in `Cert:\CurrentUser\My`; signs a JWT client assertion in place | thumbprint only |
+| env var | `TOKENREPLAY_CLIENT_SECRET` | nothing |
+| DPAPI | `tokenreplay secret protect` - user-scope DPAPI blob (+ app entropy) | `client_secret_dpapi` |
 
 ```json
 {"tenant": "<tenant-id>", "client_id": "<app-id>",
- "client_secret": "<secret>"}
+ "cert_thumbprint": "<40 hex>", "cert_store": "CurrentUser"}
 ```
+
+A plaintext `client_secret` is **refused** — that secret reads every
+sign-in in the tenant, and for an MSP a directory of those files is
+exactly the infostealer target tokenwatch catches. `secret protect`
+migrates an existing one in place (then rotate it in Entra — the old
+plaintext may survive in backups). `cert new` writes the public `.cer`
+to upload under *Certificates & secrets* and strips any secret from
+`graph.json`. tokenwatch watches `~/.tokenreplay/graph.json` as the
+`tokenreplay-graph` store and flags Entra client secrets (`Q~` format)
+anywhere as `plaintext-token`.
+
+Boundary: DPAPI and a non-exportable key stop file-grab stealers, not
+code running *as the user* — that can still call CryptUnprotectData or
+ask the key to sign. The cert keeps the key off-disk-in-the-clear and
+un-copyable to another machine, which is the realistic bar.
 
 The app registration needs `AuditLog.Read.All` **application**
 permission + admin consent. Honest status: written against the Graph
