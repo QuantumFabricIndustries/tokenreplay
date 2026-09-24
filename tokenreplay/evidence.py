@@ -347,18 +347,28 @@ def rare_country(signins, baselines):
     return out
 
 
+def implicated(findings, min_weight=20):
+    """-> {id(row): (row, [rules])} — sign-in records behind findings
+    >=min_weight, mapped to the rules that flagged them. The review
+    surface for `baselines build` output."""
+    from .score import WEIGHTS
+    out = {}
+    for f in findings:
+        if WEIGHTS.get(f.rule, 0) >= min_weight:
+            for r in f.rows:
+                ent = out.setdefault(id(r), (r, []))
+                if f.rule not in ent[1]:
+                    ent[1].append(f.rule)
+    return out
+
+
 def implicated_rows(findings, min_weight=20):
     """id()s of sign-in records behind findings >=min_weight — the set
     baseline learning must skip. SUSPICIOUS+ traffic stays out of
     history until an admin confirms it (baselines confirm); info-level
     findings like session-network-drift still learn (mobile roaming is
     legitimately new)."""
-    from .score import WEIGHTS
-    out = set()
-    for f in findings:
-        if WEIGHTS.get(f.rule, 0) >= min_weight:
-            out.update(id(r) for r in f.rows)
-    return out
+    return set(implicated(findings, min_weight))
 
 
 def correlate(findings):

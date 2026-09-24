@@ -330,6 +330,27 @@ class TestCli(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertTrue(out.exists())
 
+    def test_baselines_build_exclusion_report(self):
+        """build prints the excluded sign-ins with the exact confirm
+        command - reviewing exclusions is copy-paste, not
+        cross-referencing."""
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "o.json"
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = cli.main(["baselines", "build",
+                               "--file", str(FIX / "signins.json"),
+                               "-o", str(out)])
+            self.assertEqual(rc, 0)
+            txt = buf.getvalue()
+            self.assertIn("excluded from learning", txt)
+            self.assertIn("bob@corp.com", txt)
+            self.assertIn("session-replay", txt)
+            self.assertIn("baselines confirm", txt)
+            self.assertIn("--asn 14061", txt)
+
     def test_baselines_confirm_cmd(self):
         with tempfile.TemporaryDirectory() as td:
             b = Path(td) / "b.json"

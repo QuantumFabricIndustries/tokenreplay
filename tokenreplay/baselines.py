@@ -67,22 +67,23 @@ def _learn(b, s):
 
 
 def build(signins, audits=(), asnmap=None, allow_asn=(),
-          exclude_flagged=True):
+          exclude_flagged=True, flagged=None):
     """upn -> Baseline from a sign-in history export.
 
-    Anti-poisoning: with exclude_flagged the export is evaluated first
-    and sign-ins implicated in SUSPICIOUS+ findings are NOT learned —
-    otherwise an attacker's VPS in history lands in baselines and
-    launders itself into "known" / tenant-egress status. Flagged rows
-    only enter via `baselines confirm` (explicit admin approval).
+    Anti-poisoning: sign-ins implicated in SUSPICIOUS+ findings are NOT
+    learned — otherwise an attacker's VPS in history lands in baselines
+    and launders itself into "known" / tenant-egress status. Flagged
+    rows only enter via `baselines confirm` (explicit admin approval).
+    `flagged` lets the caller pass a precomputed id() set (the CLI
+    evaluates once for both learning and the exclusion report);
     --include-flagged restores naive learning for known-clean windows.
     """
-    flagged = set()
-    if exclude_flagged:
+    if flagged is None and exclude_flagged:
         from . import evidence
         flagged = evidence.implicated_rows(evidence.evaluate(
             signins, audits, baselines={}, asnmap=asnmap,
             allow_asn=allow_asn))
+    flagged = flagged or set()
     out = {}
     for s in signins:
         if not s.upn or id(s) in flagged:

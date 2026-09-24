@@ -73,15 +73,28 @@ def cmd_baselines(a):
     asnmap = evidence.load_asnmap(_load_json(a.asnmap)) \
         if a.asnmap else None
     allow_asn = {int(x) for x in (a.allow_asn or "").split(",") if x}
+    implicated = {}
+    if not a.include_flagged:
+        implicated = evidence.implicated(evidence.evaluate(
+            signins, baselines={}, asnmap=asnmap, allow_asn=allow_asn))
     built = bl.build(signins, asnmap=asnmap, allow_asn=allow_asn,
-                     exclude_flagged=not a.include_flagged)
+                     flagged=set(implicated))
     dest = a.output or str(_state_dir() / "baselines.json")
     _state_dir().mkdir(parents=True, exist_ok=True)
     bl.save(dest, built)
-    print(f"baselines for {len(built)} user(s) -> {dest}"
-          + ("" if a.include_flagged else
-             " (flagged sign-ins excluded - 'baselines confirm' "
-             "approves them)"))
+    print(f"baselines for {len(built)} user(s) -> {dest}")
+    if implicated:
+        per = {}
+        for row, rules in implicated.values():
+            per.setdefault((row.upn, row.asn), set()).update(rules)
+        print(f"excluded from learning ({len(implicated)} sign-in(s)):")
+        for (upn, asn), rules in sorted(per.items()):
+            print(f"  {upn}  {f'AS{asn}' if asn else '(no ASN)'}"
+                  f"  {', '.join(sorted(rules))}")
+            if asn:
+                print(f"    approve: python -m tokenreplay baselines "
+                      f"confirm --baselines {dest} "
+                      f"--user {upn} --asn {asn}")
     return 0
 
 

@@ -98,3 +98,15 @@ The poisoning path was: attacker VPS sign-ins -> learned into baselines
 whole tenant, covering the NEXT victims. Both fixes break the chain at
 different points: exclusion stops the ASN entering baselines at all;
 the scaled threshold means even leaked hosting ASNs need ~20% coverage.
+
+## Round 4b — exclusion review surface (2026-09-23)
+- [x] evidence.implicated(): id -> (row, rules) map; implicated_rows
+      reuses it.
+- [x] baselines.build accepts precomputed flagged set (CLI evaluates
+      once for learning AND the report).
+- [x] `baselines build` prints "excluded from learning": user, ASN,
+      rules, and the exact confirm command incl. baselines path.
+      Confirm granularity is per-ASN — a travel pair excludes the
+      victim's real network AND the attacker VPS under one user;
+      approving must not blanket-trust the user.
+- [x] 36 tests green.
