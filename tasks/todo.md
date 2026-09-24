@@ -131,3 +131,13 @@ the scaled threshold means even leaked hosting ASNs need ~20% coverage.
       plaintext secret is plaintext-token, not expected storage) +
       entra-client-secret pattern (Q~ format). Cross-checked: plaintext
       graph.json -> plaintext-token; cert config -> clean.
+
+## Round 6 — cert expiry (2026-09-23)
+- [x] collect.cert_status: reads NotAfter from the store (unix seconds
+      via PowerShell, no date-string parsing). None when secret-based.
+- [x] poll checks expiry BEFORE collecting: expired -> CredentialError
+      (refuses to report an empty poll as clean; watermark untouched);
+      <30d -> warning surfaced through poll's new 3-tuple into the
+      report + stderr.
+- [x] 47 tests green; live-checked cert_status against a real cert
+      (365.0d, matches cert new's AddYears(1)).

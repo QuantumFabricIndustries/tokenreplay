@@ -98,6 +98,11 @@ code running *as the user* — that can still call CryptUnprotectData or
 ask the key to sign. The cert keeps the key off-disk-in-the-clear and
 un-copyable to another machine, which is the realistic bar.
 
+Cert lifecycle: `poll` reads `NotAfter` on the configured thumbprint
+every cycle — under 30 days left is a WARN in the report; **an expired
+cert raises and refuses to report a quiet tenant** (an empty poll on a
+broken credential is not a clean poll). Rotate with `cert new`.
+
 The app registration needs `AuditLog.Read.All` **application**
 permission + admin consent. Honest status: written against the Graph
 contract, not exercised against a real tenant yet — treat `poll` as

@@ -173,6 +173,29 @@ def new_cert(out_path, store="CurrentUser", runner=_run):
     return thumb
 
 
+CERT_WARN_S = 30 * 86400       # warn this far ahead of NotAfter
+
+
+def cert_status(cfg, runner=_run):
+    """-> seconds until the configured cert's NotAfter (can be <=0), or
+    None when the config uses a secret instead of a cert. Raises
+    CredentialError when the thumbprint isn't in the store."""
+    if not cfg.get("cert_thumbprint"):
+        return None
+    thumb, store = _cert_ref(cfg)
+    rc, out, err = _ps(
+        "$ErrorActionPreference='Stop';"
+        f"$c=Get-Item 'Cert:\\{store}\\My\\{thumb}' -ErrorAction Stop;"
+        "[int]([DateTimeOffset]$c.NotAfter).ToUnixTimeSeconds()",
+        runner)
+    txt = out.strip().splitlines()[-1].strip() if out.strip() else ""
+    if rc != 0 or not re.fullmatch(r"-?\d+", txt):
+        raise CredentialError(
+            f"cannot read cert {thumb} in {store}\\My: "
+            f"{(err or out).strip()[:300]}")
+    return int(txt) - int(time.time())
+
+
 # --- credential resolution ------------------------------------------------
 
 def auth_params(cfg, env=None, runner=_run):
@@ -263,9 +286,27 @@ def save_config(cfg, env=None):
 
 def poll(env=None, opener=urllib.request.urlopen, lookback_s=3600,
          runner=_run):
-    """One collection cycle -> (signins, audits) rows since watermark."""
+    """One collection cycle -> (signins, audits, warnings).
+
+    Cert expiry is checked BEFORE collecting: an expired cert makes the
+    token request fail, and "poll ran, no findings" on a broken
+    credential reads exactly like a quiet tenant - so expiry raises,
+    and <30 days left is a warning, never silent."""
     sd = state_dir(env)
     cfg = load_config(env)
+    warnings = []
+    days_left = cert_status(cfg, runner)
+    if days_left is not None:
+        if days_left <= 0:
+            raise CredentialError(
+                f"cert {cfg['cert_thumbprint']} is EXPIRED - token "
+                "requests fail; refusing to report an empty poll as "
+                "clean. Run `tokenreplay cert new` and upload the .cer.")
+        if days_left < CERT_WARN_S:
+            warnings.append(
+                f"cert {cfg['cert_thumbprint']} expires in "
+                f"{days_left // 86400}d - run `tokenreplay cert new` "
+                "and upload the .cer")
     mark = sd / "watermark.json"
     try:
         since = json.loads(mark.read_text())["ts"]
@@ -275,4 +316,4 @@ def poll(env=None, opener=urllib.request.urlopen, lookback_s=3600,
     signins = fetch_signins(token, since, opener=opener)
     audits = fetch_audits(token, since, opener=opener)
     mark.write_text(json.dumps({"ts": time.time()}))
-    return signins, audits
+    return signins, audits, warnings

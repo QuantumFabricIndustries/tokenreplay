@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 import urllib.parse
 from pathlib import Path
@@ -461,6 +462,83 @@ class TestCredentials(unittest.TestCase):
             collect.client_assertion(
                 cfg, runner=lambda a: (1, "", "Cannot find path"))
         self.assertIn("Cannot find path", str(cm.exception))
+
+    def _poll_env(self, cfg, expiry_s=None):
+        """Fake runner answering cert_status + signing; fake opener
+        answering the token POST and empty paged GETs."""
+        td = tempfile.TemporaryDirectory()
+        (Path(td.name) / "graph.json").write_text(json.dumps(cfg))
+
+        def runner(args):
+            script = args[-1]
+            if "ToUnixTimeSeconds" in script:
+                if expiry_s is None:
+                    return 1, "", "Cannot find path"
+                return 0, str(int(time.time()) + expiry_s) + "\n", ""
+            return 0, base64.b64encode(b"sig").decode() + "\n", ""
+
+        class Resp:
+            def __init__(self, b):
+                self.b = b
+
+            def read(self):
+                return self.b
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def opener(req, timeout=0):
+            if req.data:
+                return Resp(b'{"access_token": "t"}')
+            return Resp(b'{"value": []}')
+        env = {"TOKENREPLAY_HOME": td.name}
+        return td, env, runner, opener
+
+    def test_poll_expired_cert_refuses_empty(self):
+        """Expired cert -> poll raises instead of reporting a quiet
+        tenant on a broken credential."""
+        cfg = dict(self.CFG, cert_thumbprint=self.THUMB)
+        td, env, runner, opener = self._poll_env(cfg, expiry_s=-60)
+        with td:
+            with self.assertRaises(collect.CredentialError) as cm:
+                collect.poll(env=env, opener=opener, runner=runner)
+            self.assertIn("EXPIRED", str(cm.exception))
+            # and the watermark was never written - nothing pretends ran
+            self.assertFalse((Path(td.name) / "watermark.json").exists())
+
+    def test_poll_cert_expiry_warns_30d(self):
+        cfg = dict(self.CFG, cert_thumbprint=self.THUMB)
+        td, env, runner, opener = self._poll_env(cfg,
+                                                 expiry_s=10 * 86400)
+        with td:
+            s, a, warns = collect.poll(env=env, opener=opener,
+                                       runner=runner)
+        self.assertIn("expires in 10d", warns[0])
+        td2, env2, runner2, opener2 = self._poll_env(
+            cfg, expiry_s=200 * 86400)
+        with td2:
+            _, _, warns2 = collect.poll(env=env2, opener=opener2,
+                                        runner=runner2)
+        self.assertEqual(warns2, [])
+
+    def test_poll_missing_cert_errors(self):
+        cfg = dict(self.CFG, cert_thumbprint=self.THUMB)
+        td, env, runner, opener = self._poll_env(cfg, expiry_s=None)
+        with td:
+            with self.assertRaises(collect.CredentialError):
+                collect.poll(env=env, opener=opener, runner=runner)
+
+    def test_poll_secret_config_skips_cert_check(self):
+        cfg = dict(self.CFG)
+        td, env, runner, opener = self._poll_env(cfg)
+        env[collect.SECRET_ENV] = "s3"
+        with td:
+            s, a, warns = collect.poll(env=env, opener=opener,
+                                       runner=runner)
+        self.assertEqual(warns, [])
 
     @unittest.skipUnless(sys.platform == "win32", "DPAPI is Windows-only")
     def test_dpapi_roundtrip_and_migration(self):

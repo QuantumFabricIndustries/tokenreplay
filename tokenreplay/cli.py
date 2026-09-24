@@ -117,7 +117,8 @@ def cmd_report(a):
 
 def cmd_poll(a):
     try:
-        signins, audits = collect.poll(lookback_s=a.hours * 3600)
+        signins, audits, poll_warnings = collect.poll(
+            lookback_s=a.hours * 3600)
     except collect.CredentialError as e:
         print(f"poll: {e}", file=sys.stderr)
         return 2
@@ -138,7 +139,8 @@ def cmd_poll(a):
     bl.update(base, parsed_s,
               flagged=evidence.implicated_rows(findings))
     result = score.score(findings)
-    warnings = list(evidence.coverage_warnings(parsed_s))
+    warnings = list(poll_warnings)
+    warnings += evidence.coverage_warnings(parsed_s)
     recs = evidence.recommendations(findings)
     print(report.render(result, as_json=a.json,
                         warnings=warnings, recs=recs))
