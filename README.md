@@ -31,10 +31,11 @@ exported Graph JSON — no API access needed to develop, test, or triage.
 
 | rule | weight | what it catches |
 |---|---|---|
-| `session-replay` | 80, forces COMPROMISED | same `sessionId` from 2+ **networks** — keyed on `autonomousSystemNumber` change, not country, because the common case is same-country replay (US victim, US VPS). Country change is a booster; falls back to IP+country when ASN data is absent |
+| `session-replay` | 80, forces COMPROMISED | same `sessionId` from 2+ **networks** — keyed on `autonomousSystemNumber` change, not country, because the common case is same-country replay (US victim, US VPS). FP gate: the new sighting must be hosting *or* never-seen-for-the-user — ASN hops between baseline-known networks (phone roaming wifi↔cellular) downgrade to `session-network-drift`. Country change is a booster; falls back to IP+country when ASN data is absent |
+| `session-network-drift` | 10, info | session moved networks but all of them are known-for-user or unverifiable — mobile-roaming shape, not replay |
 | `persistence-correlated` | 90, forces COMPROMISED | security-info/MFA-method registration within 72h of any other flag for that user — the capture-then-persist chain (ShinyHunters/Helix play) |
 | `device-code-tenant` | 65 | device-code auth when the TENANT has no device-code history — the flow isn't legitimate here at all |
-| `hosting-asn` | 55 | interactive auth from a hosting ASN — matched on the record's own `autonomousSystemNumber` vs a bundled list (DO/Hetzner/OVH/AWS/GCP/Azure/…), `--asnmap` CIDR labels as override |
+| `hosting-asn` | 55 | interactive auth from a hosting ASN — matched on the record's own `autonomousSystemNumber` vs a bundled list (DO/Hetzner/OVH/AWS/GCP/Azure/…), `--asnmap` CIDR labels as override. Tenant-egress gate: an ASN in ≥3 users' baselines is shared egress (Zscaler/WARP/VDI/Private Relay) and suppressed; `--allow-asn` suppresses manually |
 | `device-code-flow` | 55 | device-code auth with no user history, or from an unseen country |
 | `impossible-travel` | 45 | consecutive sign-ins faster than physics |
 | `mfa-method-add` | 35 | security-info registration, uncorrelated |
@@ -54,7 +55,8 @@ gate over exported logs.
 
 ```text
 python -m tokenreplay analyze --file signins.json [--audits a.json]
-    [--baselines b.json] [--asnmap m.json] [--json] [-o out]
+    [--baselines b.json] [--asnmap m.json] [--allow-asn 13335,16509]
+    [--json] [-o out]
 python -m tokenreplay baselines build --file history.json [-o b.json]
 python -m tokenreplay report [--json]
 python -m tokenreplay poll [--hours N]          # phase 2
@@ -101,7 +103,12 @@ Premium trial tenant is the simplest way to get one.
   audit log (separate API surface from Graph sign-ins).
 - **Residential-proxy AiTM evades `hosting-asn`.** Kits relaying through
   residential IPs don't trip ASN evidence — `session-replay` /
-  `impossible-travel` are the fallback signals.
+  `impossible-travel` are the fallback signals. Relatedly, the replay
+  FP gate is conservative **without baselines**: an ASN change between
+  two non-hosting networks downgrades to `session-network-drift` when
+  there's no per-user history to prove the new network is new — a
+  residential-proxy replay can land there. Build baselines from
+  `baselines build` over history to restore the strict path.
 - **Non-Microsoft IdPs are invisible.** Okta/Google/AWS sign-in
   telemetry is a different API surface entirely.
 - **Baselines are only as old as the history export.** A brand-new
