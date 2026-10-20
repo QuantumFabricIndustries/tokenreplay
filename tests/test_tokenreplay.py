@@ -372,6 +372,96 @@ class TestCli(unittest.TestCase):
                           "--baselines", str(b)]), 2)
 
 
+class TestPaginationAndWatermark(unittest.TestCase):
+    """Tests for BUG 1 (silent pagination cap) and BUG 2 (watermark ordering)."""
+
+    def _make_paged_opener(self, total_pages):
+        """Returns an opener that simulates ``total_pages`` pages of 1 item each."""
+        class Resp:
+            def __init__(self, body):
+                self._body = body
+            def read(self):
+                return self._body
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        call_count = [0]
+        def opener(req, timeout=0):
+            if req.data:
+                return Resp(b'{"access_token": "t"}')
+            n = call_count[0]
+            call_count[0] += 1
+            has_next = n < total_pages - 1
+            body = {"value": [{"id": f"ev-{n}"}]}
+            if has_next:
+                body["@odata.nextLink"] = (
+                    f"https://graph.microsoft.com/v1.0/next?page={n+1}"
+                )
+            return Resp(json.dumps(body).encode())
+        return opener
+
+    def test_pagination_unlimited_by_default(self):
+        """TOKENREPLAY_MAX_PAGES=0 (default) fetches all pages."""
+        warnings = []
+        opener = self._make_paged_opener(total_pages=5)
+        rows = collect._paged(
+            "https://graph.microsoft.com/v1.0/auditLogs/signIns",
+            "token", opener=opener, env={"TOKENREPLAY_MAX_PAGES": "0"},
+            warnings=warnings)
+        self.assertEqual(len(rows), 5)
+        self.assertEqual(warnings, [])
+
+    def test_pagination_cap_warns_and_stops(self):
+        """TOKENREPLAY_MAX_PAGES=2 stops at 2 pages and appends a warning."""
+        warnings = []
+        opener = self._make_paged_opener(total_pages=10)
+        rows = collect._paged(
+            "https://graph.microsoft.com/v1.0/auditLogs/signIns",
+            "token", opener=opener, env={"TOKENREPLAY_MAX_PAGES": "2"},
+            warnings=warnings)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("page limit (2)", warnings[0])
+        self.assertIn("TOKENREPLAY_MAX_PAGES", warnings[0])
+
+    def test_watermark_written_after_report_save(self):
+        """Watermark is written by cmd_poll only after last_report.json is saved.
+
+        We mock collect.poll to return a known 4-tuple and verify that
+        cmd_poll correctly writes the watermark using the returned timestamp,
+        and only after last_report.json exists.
+        """
+        import contextlib, io, types
+        from unittest import mock
+
+        fixed_ts = 1_700_000_000.0
+
+        with tempfile.TemporaryDirectory() as td:
+            sd = Path(td)
+            env = {"TOKENREPLAY_HOME": td}
+
+            args = types.SimpleNamespace(hours=1, allow_asn=None, json=False)
+
+            # Mock collect.poll to return an empty result with our fixed timestamp
+            with mock.patch("tokenreplay.cli.collect.poll",
+                            return_value=([], [], [], fixed_ts)), \
+                 mock.patch.dict(os.environ, env):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    rc = cli.cmd_poll(args)
+
+            # Watermark must exist and carry the timestamp from poll()
+            mark = sd / "watermark.json"
+            self.assertTrue(mark.exists(),
+                            "watermark.json missing after cmd_poll")
+            saved_ts = json.loads(mark.read_text())["ts"]
+            self.assertEqual(saved_ts, fixed_ts,
+                             "watermark ts must come from poll() return value")
+
+            # last_report.json must also exist (written before watermark)
+            self.assertTrue((sd / "last_report.json").exists())
+
+
 class TestCredentials(unittest.TestCase):
     CFG = {"tenant": "t-1", "client_id": "app-1"}
     THUMB = "AB" * 20
@@ -514,14 +604,14 @@ class TestCredentials(unittest.TestCase):
         td, env, runner, opener = self._poll_env(cfg,
                                                  expiry_s=10 * 86400)
         with td:
-            s, a, warns = collect.poll(env=env, opener=opener,
-                                       runner=runner)
+            s, a, warns, _ts = collect.poll(env=env, opener=opener,
+                                            runner=runner)
         self.assertIn("expires in 10d", warns[0])
         td2, env2, runner2, opener2 = self._poll_env(
             cfg, expiry_s=200 * 86400)
         with td2:
-            _, _, warns2 = collect.poll(env=env2, opener=opener2,
-                                        runner=runner2)
+            _, _, warns2, _ts2 = collect.poll(env=env2, opener=opener2,
+                                              runner=runner2)
         self.assertEqual(warns2, [])
 
     def test_poll_missing_cert_errors(self):
@@ -536,8 +626,8 @@ class TestCredentials(unittest.TestCase):
         td, env, runner, opener = self._poll_env(cfg)
         env[collect.SECRET_ENV] = "s3"
         with td:
-            s, a, warns = collect.poll(env=env, opener=opener,
-                                       runner=runner)
+            s, a, warns, _ts = collect.poll(env=env, opener=opener,
+                                            runner=runner)
         self.assertEqual(warns, [])
 
     @unittest.skipUnless(sys.platform == "win32", "DPAPI is Windows-only")

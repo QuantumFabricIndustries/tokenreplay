@@ -246,29 +246,60 @@ def get_token(cfg, opener=urllib.request.urlopen, env=None, runner=_run):
     return resp["access_token"]
 
 
-def _paged(url, token, opener=urllib.request.urlopen, max_pages=50):
+def _paged(url, token, opener=urllib.request.urlopen, env=None,
+           warnings=None):
+    """Collect all pages of a Graph query.
+
+    Respects TOKENREPLAY_MAX_PAGES env var:
+      0 (default) = unlimited
+      N > 0       = stop after N pages and emit a loud warning so operators
+                    know events may have been missed.
+
+    ``warnings`` is a mutable list; pagination warnings are appended to it
+    so callers can surface them alongside other run warnings.
+    """
+    import logging
+    try:
+        max_pages = int((env or os.environ).get("TOKENREPLAY_MAX_PAGES", "0"))
+    except ValueError:
+        max_pages = 0
+
     rows = []
-    for _ in range(max_pages):
+    pages_fetched = 0
+    while True:
         page = _get(url, token, opener=opener)
         rows += page.get("value") or []
+        pages_fetched += 1
         url = page.get("@odata.nextLink")
         if not url:
+            break
+        if max_pages > 0 and pages_fetched >= max_pages:
+            msg = (
+                f"Pagination stopped at page limit ({max_pages}). "
+                "Some events may have been missed. Consider increasing "
+                "TOKENREPLAY_MAX_PAGES or running more frequently."
+            )
+            if warnings is not None:
+                warnings.append(msg)
+            logging.warning(msg)
             break
     return rows
 
 
-def fetch_signins(token, since_ts, opener=urllib.request.urlopen):
+def fetch_signins(token, since_ts, opener=urllib.request.urlopen,
+                  env=None, warnings=None):
     iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(since_ts))
     q = urllib.parse.quote(f"createdDateTime ge {iso}")
     return _paged(f"{GRAPH}/auditLogs/signIns?$filter={q}&$top=999",
-                  token, opener)
+                  token, opener, env=env, warnings=warnings)
 
 
-def fetch_audits(token, since_ts, opener=urllib.request.urlopen):
+def fetch_audits(token, since_ts, opener=urllib.request.urlopen,
+                 env=None, warnings=None):
     iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(since_ts))
     q = urllib.parse.quote(f"activityDateTime ge {iso}")
     return _paged(f"{GRAPH}/auditLogs/directoryAudits?$filter={q}"
-                  f"&$top=999", token, opener)
+                  f"&$top=999", token, opener, env=env, warnings=warnings)
 
 
 def load_config(env=None):
@@ -313,7 +344,14 @@ def poll(env=None, opener=urllib.request.urlopen, lookback_s=3600,
     except (OSError, json.JSONDecodeError, KeyError):
         since = time.time() - lookback_s
     token = get_token(cfg, opener=opener, env=env, runner=runner)
-    signins = fetch_signins(token, since, opener=opener)
-    audits = fetch_audits(token, since, opener=opener)
-    mark.write_text(json.dumps({"ts": time.time()}))
-    return signins, audits, warnings
+    # Snapshot the new high-water timestamp BEFORE fetching so events
+    # created during the fetch window are not skipped on the next run.
+    new_ts = time.time()
+    signins = fetch_signins(token, since, opener=opener, env=env,
+                            warnings=warnings)
+    audits = fetch_audits(token, since, opener=opener, env=env,
+                          warnings=warnings)
+    # The watermark is intentionally NOT written here.  The caller must
+    # persist analysis results first and then advance the watermark, so a
+    # crash between collection and save does not silently skip events.
+    return signins, audits, warnings, new_ts
