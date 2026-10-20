@@ -117,7 +117,7 @@ def cmd_report(a):
 
 def cmd_poll(a):
     try:
-        signins, audits, poll_warnings = collect.poll(
+        signins, audits, poll_warnings, new_watermark_ts = collect.poll(
             lookback_s=a.hours * 3600)
     except collect.CredentialError as e:
         print(f"poll: {e}", file=sys.stderr)
@@ -150,6 +150,11 @@ def cmd_poll(a):
     (_state_dir() / "last_report.json").write_text(
         report.render(result, as_json=True, warnings=warnings,
                       recs=recs), encoding="utf-8")
+    # Advance watermark only AFTER analysis is persisted; a crash before
+    # this point lets the next run reprocess the same window rather than
+    # silently losing events.
+    (_state_dir() / "watermark.json").write_text(
+        json.dumps({"ts": new_watermark_ts}))
     if base:
         bl.save(_state_dir() / "baselines.json", base)
     return 0 if result["_overall"]["verdict"] in ("CLEAN", "SUSPICIOUS") \
